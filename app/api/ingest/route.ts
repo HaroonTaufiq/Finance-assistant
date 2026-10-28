@@ -1,11 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { z } from "zod";
 import { getCurrentUser } from "@/lib/db/client";
 import { ingestCsv } from "@/lib/ingest/pipeline";
 import { MAX_CSV_BYTES, formatBytes } from "@/lib/limits";
-import { SupportedCurrency as SupportedCurrencySchema } from "@/lib/contracts";
+import { ImportOverlapDecision, SupportedCurrency as SupportedCurrencySchema } from "@/lib/contracts";
 import type { CsvColumnField, CsvColumnMapping } from "@/lib/ingest/parse";
+import { OverlapReviewRequiredError } from "@/lib/ingest/dedup";
+import { UserWriteLockBusyError } from "@/lib/db/user-write-lock";
 
 export const runtime = "nodejs"; // pipeline uses node:crypto + service code
+export const maxDuration = 60;
 
 /**
  * POST /api/ingest — multipart upload of a transactions CSV.
@@ -22,6 +26,7 @@ export async function POST(request: NextRequest) {
   let dateOrder: string | null;
   let coverageConfirmed: boolean;
   let columnMappingInput: string | null;
+  let overlapDecisionsInput: string | null;
   const contentType = request.headers.get("content-type") ?? "";
   try {
     if (contentType.includes("multipart/form-data")) {
@@ -35,6 +40,7 @@ export async function POST(request: NextRequest) {
       dateOrder = form.get("dateOrder")?.toString() ?? null;
       coverageConfirmed = form.get("coverageConfirmed") === "true";
       columnMappingInput = form.get("columnMapping")?.toString() ?? null;
+      overlapDecisionsInput = form.get("overlapDecisions")?.toString() ?? null;
     } else {
       // Allow a raw text/csv body too (handy for the mock-bank path / tests).
       csv = await request.text();
@@ -42,6 +48,7 @@ export async function POST(request: NextRequest) {
       dateOrder = request.headers.get("x-finance-date-order");
       coverageConfirmed = request.headers.get("x-finance-coverage-confirmed") === "true";
       columnMappingInput = request.headers.get("x-finance-column-mapping");
+      overlapDecisionsInput = request.headers.get("x-finance-overlap-decisions");
     }
   } catch {
     return NextResponse.json({ error: "could not read upload" }, { status: 400 });
@@ -56,6 +63,15 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "invalid column mapping" },
+      { status: 400 },
+    );
+  }
+  let overlapDecisions: Record<string, "match-existing" | "keep-as-new"> | undefined;
+  try {
+    overlapDecisions = parseOverlapDecisions(overlapDecisionsInput);
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "invalid overlap decisions" },
       { status: 400 },
     );
   }
@@ -83,13 +99,45 @@ export async function POST(request: NextRequest) {
       dateOrder,
       coverageConfirmed,
       columnMapping,
+      overlapDecisions,
     });
     return NextResponse.json(summary);
   } catch (err) {
     const message = err instanceof Error ? err.message : "ingest failed";
-    const status = message.startsWith("CSV exceeds") ? 413 : message.includes("currency") ? 422 : 500;
+    if (err instanceof OverlapReviewRequiredError) {
+      return NextResponse.json({
+        error: err.message,
+        overlapReview: err.candidates,
+      }, { status: 409 });
+    }
+    const status = err instanceof UserWriteLockBusyError
+      ? 409
+      : message.startsWith("Overlap choices")
+        ? 400
+      : message.startsWith("CSV exceeds")
+        ? 413
+        : message.includes("currency")
+          ? 422
+          : 500;
     return NextResponse.json({ error: message }, { status });
   }
+}
+
+function parseOverlapDecisions(
+  value: string | null,
+): Record<string, "match-existing" | "keep-as-new"> | undefined {
+  if (!value) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("Overlap decisions must be valid JSON");
+  }
+  const result = z.record(z.string().min(1), ImportOverlapDecision).safeParse(parsed);
+  if (!result.success) {
+    throw new Error("Overlap decisions must map each review item to a supported choice");
+  }
+  return result.data;
 }
 
 function parseColumnMapping(value: string | null): CsvColumnMapping | undefined {

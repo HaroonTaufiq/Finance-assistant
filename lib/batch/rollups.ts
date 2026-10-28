@@ -6,9 +6,8 @@ import { aggregateMonthlyRollups, type RollupAggregate } from "./rollup-math";
 
 /**
  * Recompute monthly rollups (PRD-A3, SPEC §7). Per (month, category) plus a
- * `__all__` row per month. This precomputed table is the read path's workhorse:
- * its size scales with TIME PERIODS, not transaction count, so it survives
- * 10x-100x data. Idempotent upsert on the rollups PK.
+ * `__all__` row per month. Each month is replaced in one database transaction
+ * so categories removed by corrections cannot leave stale totals behind.
  *
  * Aggregation runs in JS here (write path, runs once at ingest). At larger
  * scale this becomes a Postgres GROUP BY / date_trunc job — same table shape.
@@ -71,32 +70,24 @@ export async function recomputeRollups(
     }
 
     const [currency] = currencies;
-    if (!currency) {
-      const { error: deleteError } = await supabase
-        .from("rollups")
-        .delete()
-        .eq("user_id", userId)
-        .eq("period_type", "month")
-        .eq("period_start", monthStart);
-      if (deleteError) {
-        throw new Error(`rollups: clear empty month ${monthStart} failed: ${deleteError.message}`);
-      }
-      continue;
-    }
-
-    const aggregates = aggregateMonthlyRollups(
-      transactions.map(({ amount_cents, category, category_override, transaction_kind, transaction_kind_override }) => ({
-        amount_cents,
-        category: category_override ?? category,
-        kind: transaction_kind_override ?? transaction_kind,
-      })),
-    );
-    const rows = aggregates.map((aggregate) => toRow(userId, monthStart, currency, aggregate));
-
-    const { error: upErr } = await supabase
-      .from("rollups")
-      .upsert(rows, { onConflict: "user_id,period_type,period_start,category" });
-    if (upErr) throw new Error(`rollups: upsert ${monthStart} failed: ${upErr.message}`);
+    const aggregates = currency
+      ? aggregateMonthlyRollups(
+          transactions.map(({ amount_cents, category, category_override, transaction_kind, transaction_kind_override }) => ({
+            amount_cents,
+            category: category_override ?? category,
+            kind: transaction_kind_override ?? transaction_kind,
+          })),
+        )
+      : [];
+    const rows = currency
+      ? aggregates.map((aggregate) => toRow(userId, monthStart, currency, aggregate))
+      : [];
+    const { error } = await supabase.rpc("replace_monthly_rollups", {
+      p_user_id: userId,
+      p_period_start: monthStart,
+      p_rows: rows,
+    });
+    if (error) throw new Error(`rollups: atomic replace ${monthStart} failed: ${error.message}`);
     written += rows.length;
   }
 

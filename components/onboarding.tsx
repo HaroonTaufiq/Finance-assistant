@@ -4,7 +4,14 @@ import { useState, useRef } from "react";
 import { Upload } from "lucide-react";
 import Link from "next/link";
 import Papa from "papaparse";
-import type { DateOrder, IngestSummary, SupportedCurrency } from "@/lib/contracts";
+import type {
+  DateOrder,
+  ImportOverlapCandidate,
+  IngestSummary,
+  ImportOverlapDecision,
+  SupportedCurrency,
+} from "@/lib/contracts";
+import { ImportOverlapCandidate as ImportOverlapCandidateSchema } from "@/lib/contracts";
 import { parseTransactions, type CsvColumnField, type CsvColumnMapping } from "@/lib/ingest/parse";
 import { countImportOverlaps } from "@/lib/ingest/preview";
 import { recordAnalyticsEvent } from "@/lib/analytics/client";
@@ -95,11 +102,15 @@ export function Onboarding({
   const [coverageConfirmed, setCoverageConfirmed] = useState(false);
   const [columnMapping, setColumnMapping] = useState<CsvColumnMapping>({});
   const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [overlapReview, setOverlapReview] = useState<ImportOverlapCandidate[]>([]);
+  const [overlapChoices, setOverlapChoices] = useState<Record<string, ImportOverlapDecision>>({});
   const analysisErrors = preview?.analysis?.errors ?? [];
 
   async function chooseFile(nextFile: File) {
     setError(null);
     setCoverageConfirmed(false);
+    setOverlapReview([]);
+    setOverlapChoices({});
     if (nextFile.size > MAX_CSV_BYTES) {
       setError(`That file is too large (max ${formatBytes(MAX_CSV_BYTES)}).`);
       return;
@@ -144,8 +155,19 @@ export function Onboarding({
       form.append("dateOrder", dateOrder);
       form.append("coverageConfirmed", String(coverageConfirmed));
       form.append("columnMapping", JSON.stringify(columnMapping));
+      form.append("overlapDecisions", JSON.stringify(overlapChoices));
       const res = await fetch("/api/ingest", { method: "POST", body: form });
       const json = await res.json();
+      if (res.status === 409) {
+        const candidates = ImportOverlapCandidateSchema.array().safeParse(json.overlapReview);
+        if (!candidates.success) {
+          throw new Error(json.error ?? "The server returned an invalid overlap review.");
+        }
+        setOverlapReview(candidates.data);
+        setOverlapChoices({});
+        setError(json.error ?? "Review possible overlaps before importing.");
+        return;
+      }
       if (!res.ok) throw new Error(json.error ?? "Import failed");
       void recordAnalyticsEvent({
         eventKey: `${eventKey}:success`,
@@ -238,6 +260,8 @@ export function Onboarding({
                   const value = event.target.value;
                   if (value === "USD" || value === "PKR" || value === "EUR" || value === "GBP") {
                     setCurrency(value);
+                    setOverlapReview([]);
+                    setOverlapChoices({});
                     setPreview(makePreview(csvText, preview.headers, value, dateOrder, columnMapping));
                   }
                 }}
@@ -257,6 +281,8 @@ export function Onboarding({
                 onChange={(event) => {
                   if (event.target.value === "MDY" || event.target.value === "DMY") {
                     setDateOrder(event.target.value);
+                    setOverlapReview([]);
+                    setOverlapChoices({});
                     setPreview(makePreview(csvText, preview.headers, currency, event.target.value, columnMapping));
                   }
                 }}
@@ -285,6 +311,8 @@ export function Onboarding({
                       const nextMapping = { ...columnMapping, [field]: event.target.value };
                       if (!event.target.value) delete nextMapping[field];
                       setColumnMapping(nextMapping);
+                      setOverlapReview([]);
+                      setOverlapChoices({});
                       setPreview(makePreview(csvText, preview.headers, currency, dateOrder, nextMapping));
                     }}
                     className="mt-1 block w-full rounded border border-border bg-bg px-2 py-2 text-sm text-text"
@@ -331,6 +359,51 @@ export function Onboarding({
               </>
             ) : null}
           </div>
+          {overlapReview.length > 0 && (
+            <fieldset className="mt-4 rounded border border-warn/40 bg-surface-sunk p-3 text-left">
+              <legend className="px-1 text-sm font-medium">Possible overlaps with saved history</legend>
+              <p className="text-xs text-text-muted">
+                Nothing has been committed. For each row, choose whether it is already in your history
+                or a separate legitimate purchase. Identical rows are never discarded automatically.
+              </p>
+              <ul className="mt-3 space-y-3">
+                {overlapReview.map((candidate) => (
+                  <li key={candidate.key} className="rounded border border-border bg-surface p-3">
+                    <p className="text-sm">
+                      {candidate.date} · {candidate.merchant ?? "Unlabeled transaction"} ·{" "}
+                      {new Intl.NumberFormat(undefined, {
+                        style: "currency",
+                        currency: candidate.currency,
+                      }).format(candidate.amount_cents / 100)}
+                    </p>
+                    <p className="mt-1 text-xs text-text-muted">
+                      {candidate.existingCount} matching row{candidate.existingCount === 1 ? "" : "s"} already saved.
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-4 text-xs">
+                      {([
+                        ["match-existing", "Match an existing row"],
+                        ["keep-as-new", "Keep as a new purchase"],
+                      ] as const).map(([action, label]) => (
+                        <label key={action} className="flex items-center gap-2">
+                          <input
+                            type="radio"
+                            name={`overlap-${candidate.key}`}
+                            value={action}
+                            checked={overlapChoices[candidate.key] === action}
+                            onChange={() => setOverlapChoices((previous) => ({
+                              ...previous,
+                              [candidate.key]: action,
+                            }))}
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </fieldset>
+          )}
           <div className="mt-3 overflow-x-auto">
             <table className="min-w-full text-xs">
               <thead>
@@ -375,11 +448,16 @@ export function Onboarding({
                 preview.analysis.totalRows > MAX_CSV_ROWS ||
                 new Set(preview.analysis.valid.map((row) => row.currency)).size > 1 ||
                 preview.analysis.valid.some((row) => row.currency !== currency)
+                || overlapReview.some((candidate) => !overlapChoices[candidate.key])
               }
               onClick={() => void upload()}
               className="rounded bg-accent px-3 py-2 text-sm text-white disabled:opacity-50"
             >
-              {busy ? "Importing…" : `Confirm import in ${currency}`}
+              {busy
+                ? "Importing…"
+                : overlapReview.length > 0
+                  ? `Confirm ${overlapReview.length} overlap choice${overlapReview.length === 1 ? "" : "s"}`
+                  : `Confirm import in ${currency}`}
             </button>
             <button
               type="button"
@@ -389,6 +467,8 @@ export function Onboarding({
                 setPreview(null);
                 setCsvText("");
                 setColumnMapping({});
+                setOverlapReview([]);
+                setOverlapChoices({});
                 setCoverageConfirmed(false);
                 setCurrency("");
                 setDateOrder("");

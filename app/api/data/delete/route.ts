@@ -1,6 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentUser, getServerClient } from "@/lib/db/client";
 import { fetchAllPages } from "@/lib/db/pagination";
+import { UserWriteLockBusyError, withUserWriteLock } from "@/lib/db/user-write-lock";
+
+export const maxDuration = 60;
 
 export async function POST(request: NextRequest) {
   const user = await getCurrentUser();
@@ -22,6 +25,8 @@ export async function POST(request: NextRequest) {
   }
 
   const supabase = await getServerClient();
+  try {
+    return await withUserWriteLock(supabase, user.id, async () => {
   const receipts = await fetchAllPages(
     supabase
       .from("receipts")
@@ -47,9 +52,19 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `could not delete finance data: ${error.message}` }, { status: 500 });
   }
 
-  return NextResponse.json({
+      return NextResponse.json({
     deleted: true,
     signInAccountKept: true,
     deletedReceiptFiles: paths.length,
   });
+    });
+  } catch (error) {
+    if (error instanceof UserWriteLockBusyError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Could not acquire account write lock" },
+      { status: 503 },
+    );
+  }
 }

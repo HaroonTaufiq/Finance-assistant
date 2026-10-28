@@ -51,6 +51,7 @@ export const TransactionLite = z.object({
   date: IsoDate,
   merchant: z.string().nullable(),
   category: z.string(),
+  kind: z.enum(["expense", "refund", "income", "transfer", "unknown"]),
   amount_cents: z.number().int(),
   currency: Currency,
 });
@@ -76,6 +77,7 @@ export const GetTrendOutput = z.object({
   current_cents: z.number().int(),
   average_cents: z.number().int(),
   delta_pct: z.number().nullable(),
+  currency: z.string().nullable(),
 });
 
 // ---- getSubscriptions (Tier 1) ---------------------------------------------
@@ -126,6 +128,7 @@ export const GetBudgetStatusInput = z.object({
 });
 export const BudgetStatus = z.object({
   category: z.string(),
+  currency: z.string().nullable(),
   limit_cents: z.number().int(),
   spent_cents: z.number().int(),
   pct_used: z.number(),
@@ -165,7 +168,7 @@ export const LookupMerchantOutput = z.object({
 
 // ---- summarizeFinances (Tier 4) --------------------------------------------
 export const SummarizeFinancesInput = z.object({
-  period: z.enum(["month", "quarter", "year"]).default("month"),
+  period: z.literal("month").default("month"),
 });
 export const SummarizeFinancesOutput = z.object({
   summary: z.string(),
@@ -175,6 +178,7 @@ export const SummarizeFinancesOutput = z.object({
 // ---- suggestCutbacks (Tier 4) ----------------------------------------------
 export const SuggestCutbacksInput = z.object({});
 export const SuggestCutbacksOutput = z.object({
+  currency: z.string().nullable(),
   suggestions: z.array(
     z.object({
       title: z.string(),

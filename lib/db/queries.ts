@@ -134,18 +134,6 @@ export async function getTransactions(
   input: TxnIn,
 ): Promise<TxnOut> {
   const f = input.filters;
-  let query = supabase
-    .from("transactions")
-    .select("txn_date, merchant_norm, category, amount_cents, currency")
-    .eq("user_id", userId);
-
-  if (f.category) query = query.eq("category", f.category);
-  if (f.merchant) query = query.ilike("merchant_norm", `%${f.merchant.toUpperCase()}%`);
-  if (f.startDate) query = query.gte("txn_date", f.startDate);
-  if (f.endDate) query = query.lte("txn_date", f.endDate);
-  if (f.min != null) query = query.gte("amount_cents", Math.round(f.min * 100));
-  if (f.max != null) query = query.lte("amount_cents", Math.round(f.max * 100));
-
   const sort: Record<TxnIn["sort"], { col: string; asc: boolean }> = {
     date_desc: { col: "txn_date", asc: false },
     date_asc: { col: "txn_date", asc: true },
@@ -153,19 +141,63 @@ export async function getTransactions(
     amount_asc: { col: "amount_cents", asc: true },
   };
   const s = sort[input.sort];
+  const buildQuery = (categoryColumn?: "category" | "category_override") => {
+    let query = supabase
+      .from("transactions")
+      .select("id, txn_date, merchant_norm, category, category_override, transaction_kind, transaction_kind_override, amount_cents, currency")
+      .eq("user_id", userId);
 
-  const { data, error } = await query
-    .order(s.col, { ascending: s.asc })
-    .limit(input.limit + 1); // +1 to detect hasMore
-  if (error) throw new Error(`getTransactions failed: ${error.message}`);
+    if (categoryColumn && f.category) query = query.eq(categoryColumn, f.category);
+    if (f.merchant) query = query.ilike("merchant_norm", `%${f.merchant.toUpperCase()}%`);
+    if (f.startDate) query = query.gte("txn_date", f.startDate);
+    if (f.endDate) query = query.lte("txn_date", f.endDate);
+    if (f.min != null) query = query.gte("amount_cents", Math.round(f.min * 100));
+    if (f.max != null) query = query.lte("amount_cents", Math.round(f.max * 100));
 
-  const rows = (data as { txn_date: string; merchant_norm: string | null; category: string; amount_cents: number; currency: string }[] | null) ?? [];
+    return query
+      .order(s.col, { ascending: s.asc })
+      .order("id", { ascending: true })
+      .limit(input.limit + 1);
+  };
+  const queries = f.category
+    ? [buildQuery("category"), buildQuery("category_override")]
+    : [buildQuery()];
+  const results = await Promise.all(queries);
+  const errored = results.find((result) => result.error);
+  if (errored?.error) throw new Error(`getTransactions failed: ${errored.error.message}`);
+
+  type TransactionResultRow = {
+    id: string;
+    txn_date: string;
+    merchant_norm: string | null;
+    category: string;
+    category_override: string | null;
+    transaction_kind: C.TransactionKind;
+    transaction_kind_override: C.TransactionKind | null;
+    amount_cents: number;
+    currency: string;
+  };
+  const byId = new Map<string, TransactionResultRow>();
+  for (const result of results) {
+    for (const row of (result.data as TransactionResultRow[] | null) ?? []) {
+      byId.set(row.id, row);
+    }
+  }
+  const rows = [...byId.values()].sort((a, b) => {
+    const left = a[s.col as keyof TransactionResultRow];
+    const right = b[s.col as keyof TransactionResultRow];
+    const comparison = typeof left === "number" && typeof right === "number"
+      ? left - right
+      : String(left).localeCompare(String(right));
+    return (s.asc ? comparison : -comparison) || a.id.localeCompare(b.id);
+  });
   const hasMore = rows.length > input.limit;
   return {
     rows: rows.slice(0, input.limit).map((r) => ({
       date: r.txn_date,
       merchant: r.merchant_norm,
-      category: r.category,
+      category: r.category_override ?? r.category,
+      kind: r.transaction_kind_override ?? r.transaction_kind,
       amount_cents: r.amount_cents,
       currency: r.currency,
     })),
@@ -183,7 +215,7 @@ export async function getTrend(
   const cat = input.category ?? "__all__";
   const { data, error } = await supabase
     .from("rollups")
-    .select("period_start, total_spend_cents, net_spend_cents")
+    .select("period_start, total_spend_cents, net_spend_cents, currency")
     .eq("user_id", userId)
     .eq("period_type", "month")
     .eq("category", cat)
@@ -194,7 +226,10 @@ export async function getTrend(
     period_start: string;
     total_spend_cents: number;
     net_spend_cents: number;
+    currency: string | null;
   }[] | null) ?? [];
+  const currencies = new Set(all.map((row) => row.currency).filter((value): value is string => Boolean(value)));
+  if (currencies.size > 1) throw new Error("getTrend failed: mixed currencies in the selected dataset");
   const series = all.slice(-input.periods);
   const current = series.length > 0 ? series[series.length - 1]!.net_spend_cents : 0;
   const prior = series.slice(0, -1);
@@ -211,6 +246,7 @@ export async function getTrend(
     current_cents: current,
     average_cents: average,
     delta_pct,
+    currency: [...currencies][0] ?? null,
   };
 }
 
@@ -321,6 +357,7 @@ async function statusFor(
   budget: { category: string; limit_cents: number },
   exclusions: Exclusion[],
   month: string,
+  currency: string | null,
 ): Promise<BudgetStatusOut> {
   const base = await monthSpend(supabase, userId, month, budget.category);
   const applicable = exclusions.filter((e) => e.from === budget.category);
@@ -334,12 +371,23 @@ async function statusFor(
     : 0;
   return {
     category: budget.category,
+    currency,
     limit_cents: budget.limit_cents,
     spent_cents: spent,
     pct_used: pct,
     remaining_cents: budget.limit_cents - spent,
     exclusionsApplied: applicable.map((e) => e.category),
   };
+}
+
+async function datasetCurrency(supabase: SupabaseClient, userId: string): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("financial_settings")
+    .select("currency")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw new Error(`dataset currency lookup failed: ${error.message}`);
+  return (data as { currency: string | null } | null)?.currency ?? null;
 }
 
 export async function getBudgetStatus(
@@ -349,6 +397,7 @@ export async function getBudgetStatus(
   exclusions: Exclusion[],
 ): Promise<GetBudgetStatusOut> {
   const month = await latestDataMonth(supabase, userId);
+  const currency = await datasetCurrency(supabase, userId);
   let query = supabase
     .from("budgets")
     .select("category, limit_cents")
@@ -361,7 +410,7 @@ export async function getBudgetStatus(
 
   const budgets: BudgetStatusOut[] = [];
   for (const b of (data as { category: string; limit_cents: number }[] | null) ?? []) {
-    budgets.push(await statusFor(supabase, userId, b, exclusions, month));
+    budgets.push(await statusFor(supabase, userId, b, exclusions, month, currency));
   }
   return { budgets };
 }
@@ -382,7 +431,8 @@ export async function setBudget(
   if (error) throw new Error(`setBudget failed: ${error.message}`);
 
   const month = await latestDataMonth(supabase, userId);
-  return statusFor(supabase, userId, { category: input.category, limit_cents }, exclusions, month);
+  const currency = await datasetCurrency(supabase, userId);
+  return statusFor(supabase, userId, { category: input.category, limit_cents }, exclusions, month, currency);
 }
 
 // ---- user memory (PRD-B3) -------------------------------------------------
@@ -403,22 +453,4 @@ export async function saveMemory(
   if (error) throw new Error(`saveMemory failed: ${error.message}`);
 
   return { ok: true, summary: confirmation };
-}
-
-/** Compact recent-rollup context for the reasoning-tier synthesis tools. */
-export async function getRollupContext(
-  supabase: SupabaseClient,
-  userId: string,
-  months = 6,
-): Promise<{ period_start: string; category: string; total_spend_cents: number; total_income_cents: number }[]> {
-  await assertDerivedDataReady(supabase, userId);
-  const { data, error } = await supabase
-    .from("rollups")
-    .select("period_start, category, total_spend_cents, total_income_cents")
-    .eq("user_id", userId)
-    .eq("period_type", "month")
-    .order("period_start", { ascending: false })
-    .limit(months * 14); // ~13 categories + __all__ per month
-  if (error) throw new Error(`getRollupContext failed: ${error.message}`);
-  return (data as { period_start: string; category: string; total_spend_cents: number; total_income_cents: number }[] | null) ?? [];
 }

@@ -117,14 +117,21 @@ export function normalizeRow(
     transfers: "transfer",
     unknown: "unknown",
   };
-  const inferredKind =
-    rawKind !== null && rawKind !== undefined
-      ? kindAliases[rawKind] ?? rawKind
-      : amount_cents < 0
-        ? "expense"
-        : categoryKind
-          ? categoryKind
-          : "unknown";
+  const explicitKind = rawKind ? kindAliases[rawKind] : undefined;
+  if (rawKind && !explicitKind) {
+    return { ok: false, raw: row, reason: `unrecognized transaction kind "${rawKind}"; review this row` };
+  }
+  const inferredKind = explicitKind ?? categoryKind ?? (amount_cents < 0 ? "expense" : "unknown");
+  if (
+    (amount_cents < 0 && (inferredKind === "refund" || inferredKind === "income")) ||
+    (amount_cents > 0 && inferredKind === "expense")
+  ) {
+    return {
+      ok: false,
+      raw: row,
+      reason: `transaction kind "${inferredKind}" conflicts with the amount sign; review the row's kind and amount`,
+    };
+  }
   const currency = pick(row, cols.currency)?.toUpperCase() ?? options.defaultCurrency ?? "USD";
   const validatedCurrency = SupportedCurrencySchema.safeParse(currency);
   if (!validatedCurrency.success) {

@@ -81,6 +81,31 @@ describe("dedupeInBatch", () => {
 });
 
 describe("normalizeRow column detection", () => {
+  it("classifies both transfer signs from a category-only export without counting them as spending", () => {
+    const csv =
+      "Date,Description,Amount,Category\n" +
+      "02/10/2024,Transfer out,-200.00,transfers\n" +
+      "02/10/2024,Transfer in,200.00,transfers\n";
+    const { valid, errors } = parseTransactions(csv);
+
+    expect(errors).toHaveLength(0);
+    expect(valid.map((row) => row.transaction_kind)).toEqual(["transfer", "transfer"]);
+  });
+
+  it("honors explicit kind before amount inference and quarantines contradictory signs", () => {
+    const csv =
+      "Date,Description,Amount,Kind\n" +
+      "02/10/2024,Transfer out,-200.00,transfer\n" +
+      "02/10/2024,Refund,20.00,refund\n" +
+      "02/10/2024,Wrong way,-20.00,income\n" +
+      "02/10/2024,Wrong expense,20.00,expense\n";
+    const { valid, errors } = parseTransactions(csv);
+
+    expect(valid.map((row) => row.transaction_kind)).toEqual(["transfer", "refund"]);
+    expect(errors).toHaveLength(2);
+    expect(errors.every((row) => /conflicts with the amount sign; review/i.test(row.reason))).toBe(true);
+  });
+
   it("handles separate debit/credit columns", () => {
     const csv =
       "Date,Description,Debit,Credit\n" +

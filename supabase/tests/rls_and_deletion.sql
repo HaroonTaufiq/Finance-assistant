@@ -1,6 +1,6 @@
 begin;
 
-select plan(19);
+select plan(33);
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at)
 values
@@ -77,6 +77,118 @@ select set_config('request.jwt.claim.sub', 'a0000000-0000-4000-8000-000000000001
 select set_config('request.jwt.claim.role', 'authenticated', true);
 select is((select count(*)::integer from public.transactions), 1, 'account A sees only its transactions');
 select is((select count(*)::integer from public.analytics_events), 1, 'account A sees only its analytics');
+select is(
+  public.acquire_user_write_lock(
+    'a0000000-0000-4000-8000-000000000001',
+    'a4000000-0000-4000-8000-000000000001',
+    90
+  ),
+  true,
+  'account A can acquire its durable write lock'
+);
+select is(
+  public.acquire_user_write_lock(
+    'a0000000-0000-4000-8000-000000000001',
+    'a4000000-0000-4000-8000-000000000002',
+    90
+  ),
+  false,
+  'a second request cannot acquire the active account write lock'
+);
+select is(
+  public.release_user_write_lock(
+    'a0000000-0000-4000-8000-000000000001',
+    'a4000000-0000-4000-8000-000000000002'
+  ),
+  false,
+  'a request cannot release another request write lock'
+);
+select is(
+  public.release_user_write_lock(
+    'a0000000-0000-4000-8000-000000000001',
+    'a4000000-0000-4000-8000-000000000001'
+  ),
+  true,
+  'the lock owner can release its write lock'
+);
+select is(
+  public.reserve_user_ai_request(
+    'a0000000-0000-4000-8000-000000000001',
+    'a5000000-0000-4000-8000-000000000001',
+    1,
+    3600,
+    60
+  ),
+  'reserved',
+  'account A can reserve one bounded AI request'
+);
+select is(
+  public.reserve_user_ai_request(
+    'a0000000-0000-4000-8000-000000000001',
+    'a5000000-0000-4000-8000-000000000002',
+    1,
+    3600,
+    60
+  ),
+  'busy',
+  'a concurrent AI request is denied while the slot is active'
+);
+select is(
+  public.release_user_ai_request(
+    'a0000000-0000-4000-8000-000000000001',
+    'a5000000-0000-4000-8000-000000000001'
+  ),
+  true,
+  'the AI request owner can release its slot'
+);
+select is(
+  public.reserve_user_ai_request(
+    'a0000000-0000-4000-8000-000000000001',
+    'a5000000-0000-4000-8000-000000000003',
+    1,
+    3600,
+    60
+  ),
+  'limited',
+  'hourly request quota is enforced after the slot is released'
+);
+select is(
+  public.replace_monthly_rollups(
+    'a0000000-0000-4000-8000-000000000001',
+    '2024-01-01',
+    '[
+      {"category":"__all__","currency":"USD","total_spend_cents":100,"total_refund_cents":0,"net_spend_cents":100,"total_income_cents":0,"total_unknown_inflow_cents":0,"txn_count":1},
+      {"category":"other","currency":"USD","total_spend_cents":100,"total_refund_cents":0,"net_spend_cents":100,"total_income_cents":0,"total_unknown_inflow_cents":0,"txn_count":1}
+    ]'::jsonb
+  ),
+  2,
+  'a corrected month is replaced as one complete category set'
+);
+select is(
+  (select count(*)::integer from public.rollups where user_id = 'a0000000-0000-4000-8000-000000000001' and category = 'dining'),
+  0,
+  'the category removed by correction is deleted from the rollup'
+);
+select is(
+  (select total_spend_cents from public.rollups where user_id = 'a0000000-0000-4000-8000-000000000001' and category = 'other'),
+  100::bigint,
+  'the replacement category carries the corrected amount'
+);
+select throws_ok(
+  $$select public.replace_monthly_rollups(
+    'a0000000-0000-4000-8000-000000000001',
+    '2024-01-01',
+    '[{"category":null,"currency":"USD","total_spend_cents":0,"total_refund_cents":0,"net_spend_cents":0,"total_income_cents":0,"total_unknown_inflow_cents":0,"txn_count":0}]'::jsonb
+  )$$,
+  '23502',
+  null,
+  'an invalid replacement fails as a database transaction'
+);
+select is(
+  (select count(*)::integer from public.rollups where user_id = 'a0000000-0000-4000-8000-000000000001' and category = 'other'),
+  1,
+  'a failed replacement retains the previous complete month'
+);
 insert into public.subscriptions (user_id, merchant_norm, avg_amount_cents, last_seen, lifecycle_status)
 values ('a0000000-0000-4000-8000-000000000001', 'STREAM-A', 150, '2024-02-05', 'active')
 on conflict (user_id, merchant_norm) do update
@@ -84,6 +196,12 @@ set avg_amount_cents = excluded.avg_amount_cents,
     last_seen = excluded.last_seen,
     lifecycle_status = excluded.lifecycle_status;
 select is((select status from public.subscriptions where merchant_norm = 'STREAM-A'), 'dismissed', 'subscription recomputation preserves the user review state');
+reset role;
+insert into public.user_ai_slots (user_id, slot_token, expires_at)
+values ('a0000000-0000-4000-8000-000000000001', 'a6000000-0000-4000-8000-000000000001', now() + interval '1 minute');
+set local role authenticated;
+select set_config('request.jwt.claim.sub', 'a0000000-0000-4000-8000-000000000001', true);
+select set_config('request.jwt.claim.role', 'authenticated', true);
 select lives_ok('select public.delete_my_financial_data()', 'account A can delete its finance data');
 select is((select count(*)::integer from public.transactions), 0, 'account A transactions are deleted');
 select is((select count(*)::integer from public.import_jobs), 0, 'account A import history is deleted');
@@ -98,6 +216,17 @@ select is((select count(*)::integer from public.messages), 0, 'account A message
 select is((select count(*)::integer from public.receipts), 0, 'account A receipt records are deleted');
 select is((select count(*)::integer from public.ingest_errors), 0, 'account A import errors are deleted');
 select is((select count(*)::integer from public.analytics_events), 0, 'account A analytics are deleted');
+select is(
+  public.reserve_user_ai_request(
+    'a0000000-0000-4000-8000-000000000001',
+    'a5000000-0000-4000-8000-000000000004',
+    1,
+    3600,
+    60
+  ),
+  'reserved',
+  'deletion removes the active AI slot and quota bucket'
+);
 reset role;
 
 set local role authenticated;

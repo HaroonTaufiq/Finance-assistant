@@ -9,9 +9,9 @@ export function parseCutbacksOutput(text: string) {
     throw new Error("Cutback suggestions returned invalid JSON", { cause: error });
   }
 
-  const parsed = SuggestCutbacksOutput.safeParse({ suggestions: value });
+  const parsed = SuggestCutbacksOutput.shape.suggestions.safeParse(value);
   if (!parsed.success) {
     throw new Error("Cutback suggestions returned an invalid shape", { cause: parsed.error });
   }
-  return parsed.data.suggestions;
+  return parsed.data;
 }

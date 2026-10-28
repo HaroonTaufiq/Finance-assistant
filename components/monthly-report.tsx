@@ -63,6 +63,9 @@ type Report = {
 };
 
 type Draft = { category: string; kind: string };
+type ExplanationTopic =
+  | { kind: "change" }
+  | { kind: "recurring"; merchant: string };
 
 function money(cents: number, currency: string) {
   return new Intl.NumberFormat(undefined, {
@@ -100,6 +103,10 @@ export function MonthlyReport({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retryRequired, setRetryRequired] = useState(false);
+  const [explanation, setExplanation] = useState<{ revisionId: string; text: string } | null>(null);
+  const [explanationError, setExplanationError] = useState<string | null>(null);
+  const [explanationTopic, setExplanationTopic] = useState<ExplanationTopic | null>(null);
+  const [explaining, setExplaining] = useState(false);
   const requestId = useRef(0);
   const firstViewTracked = useRef(false);
   const completedReports = useRef(new Set<string>());
@@ -116,6 +123,9 @@ export function MonthlyReport({
       if (request !== requestId.current) return;
       const next = payload as Report;
       setReport(next);
+      setExplanation(null);
+      setExplanationError(null);
+      setExplanationTopic(null);
       setSampleMode(false);
       if (next.month) setMonth(next.month);
       setDrafts(
@@ -144,6 +154,49 @@ export function MonthlyReport({
       if (request === requestId.current) setLoading(false);
     }
   }, []);
+
+  async function explain(topic: ExplanationTopic) {
+    if (!report?.month || !report.revision?.id) return;
+    const revisionId = report.revision.id;
+    const startedAt = performance.now();
+    setExplanationTopic(topic);
+    setExplanation(null);
+    setExplanationError(null);
+    setExplaining(true);
+    try {
+      const response = await fetch("/api/report/explanation", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ month: report.month, revisionId, topic }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Could not explain this report");
+      if (result.revisionId !== revisionId) {
+        throw new Error("The report changed while the explanation was being prepared. Refresh and retry.");
+      }
+      setExplanation({ revisionId, text: result.text });
+      void recordAnalyticsEvent({
+        eventKey: `explanation-success:${crypto.randomUUID()}`,
+        eventName: "explanation_succeeded",
+        mode: "personal",
+        revision: revisionId,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Could not explain this report";
+      setExplanationError(message);
+      void recordAnalyticsEvent({
+        eventKey: `explanation-failure:${crypto.randomUUID()}`,
+        eventName: "explanation_failed",
+        mode: "personal",
+        revision: revisionId,
+        durationMs: Math.round(performance.now() - startedAt),
+        errorCode: "unknown",
+      });
+    } finally {
+      setExplaining(false);
+    }
+  }
 
   useEffect(() => {
     if (!firstViewTracked.current) {
@@ -373,12 +426,16 @@ export function MonthlyReport({
                       {report.comparison.priorMonth}: {money(report.comparison.priorNetSpendCents ?? 0, currency)}
                     </p>
                     {!sampleMode && (
-                      <Link
-                        href={`/chat?question=${encodeURIComponent(`Explain the ${report.month} versus ${report.comparison.priorMonth} net-spending change using calculated report evidence. Distinguish facts from interpretation.`)}`}
-                        className="mt-3 inline-block text-sm text-accent underline"
+                      <button
+                        type="button"
+                        disabled={explaining || !report.revision?.id}
+                        onClick={() => void explain({ kind: "change" })}
+                        className="mt-3 inline-block text-sm text-accent underline disabled:opacity-50"
                       >
-                        Explain this change
-                      </Link>
+                        {explaining && explanationTopic?.kind === "change"
+                          ? "Explaining…"
+                          : "Explain this change"}
+                      </button>
                     )}
                     <p className="mt-1 font-display text-xl font-semibold">
                       {report.comparison.deltaCents > 0 ? "+" : ""}
@@ -447,18 +504,57 @@ export function MonthlyReport({
                         ))}
                       </ol>
                       {!sampleMode && (
-                        <Link
-                          href={`/chat?question=${encodeURIComponent(`Why is ${candidate.merchant_norm} a recurring-charge candidate? Cite the observed dates and amounts, state the sample size, and explain uncertainty without calling it a verified subscription.`)}`}
-                          className="mt-2 inline-block text-xs text-accent underline"
+                        <button
+                          type="button"
+                          disabled={explaining || !report.revision?.id}
+                          onClick={() => void explain({
+                            kind: "recurring",
+                            merchant: candidate.merchant_norm,
+                          })}
+                          className="mt-2 inline-block text-xs text-accent underline disabled:opacity-50"
                         >
-                          Explain this candidate
-                        </Link>
+                          {explaining && explanationTopic?.kind === "recurring" &&
+                          explanationTopic.merchant === candidate.merchant_norm
+                            ? "Explaining…"
+                            : "Explain this candidate"}
+                        </button>
                       )}
                     </li>
                   ))}
                 </ul>
               )}
             </section>
+
+            {(explanationError || explanation) && (
+              <section className="mt-4 rounded border border-border bg-surface p-4" aria-live="polite">
+                <h2 className="font-medium">Report explanation</h2>
+                {explanationError ? (
+                  <>
+                    <p className="mt-2 text-sm text-danger">{explanationError}</p>
+                    <p className="mt-1 text-xs text-text-muted">
+                      The deterministic report remains available. Provider calls are optional.
+                    </p>
+                    {explanationTopic && (
+                      <button
+                        type="button"
+                        disabled={explaining}
+                        onClick={() => void explain(explanationTopic)}
+                        className="mt-2 text-sm text-accent underline disabled:opacity-50"
+                      >
+                        Retry explanation
+                      </button>
+                    )}
+                  </>
+                ) : explanation ? (
+                  <>
+                    <p className="mt-2 whitespace-pre-wrap text-sm text-text">{explanation.text}</p>
+                    <p className="mt-2 text-xs text-text-faint">
+                      Based on report revision {explanation.revisionId.slice(0, 8)}.
+                    </p>
+                  </>
+                ) : null}
+              </section>
+            )}
 
             <section className="mt-6 rounded border border-border bg-surface p-4">
               <h2 className="font-medium">Review transactions</h2>

@@ -10,6 +10,7 @@ vi.mock("@/lib/db/client", () => ({ getServerClient }));
 vi.mock("@/lib/batch", () => ({ runBatchForUser }));
 
 import { ingestCsv } from "./pipeline";
+import { OverlapReviewRequiredError, type ExistingSourceLessTransaction } from "./dedup";
 
 describe("ingestCsv recovery", () => {
   const savedHashes = new Set<string>();
@@ -17,10 +18,12 @@ describe("ingestCsv recovery", () => {
     string,
     { id: string; affected_months: string[]; status: string; coverage_confirmed: boolean }
   >();
+  let existingTransactions: ExistingSourceLessTransaction[] = [];
 
   beforeEach(() => {
     savedHashes.clear();
     jobs.clear();
+    existingTransactions = [];
     getServerClient.mockReset();
     runBatchForUser.mockReset();
 
@@ -56,22 +59,38 @@ describe("ingestCsv recovery", () => {
                 select: () => ({ single: async () => ({ data: { id: job.id }, error: null }) }),
               };
             },
-            select: () => ({
-              eq: () => ({
-                neq: async () => ({
+            select: () => {
+              const filters: [string, unknown][] = [];
+              const builder = {
+                eq(column: string, value: unknown) {
+                  filters.push([column, value]);
+                  return builder;
+                },
+                neq: async (column: string, value: unknown) => ({
                   data: [...jobs.values()]
-                    .filter((job) => job.status !== "complete")
-                    .map(({ affected_months }) => ({ affected_months })),
+                    .filter((job) => column !== "status" || job.status !== value)
+                    .map(({ id, affected_months }) => ({ id, affected_months })),
                   error: null,
                 }),
-              }),
-            }),
+                maybeSingle: async () => {
+                  const fingerprint = filters.find(([column]) => column === "file_fingerprint")?.[1];
+                  const job = typeof fingerprint === "string" ? jobs.get(fingerprint) : undefined;
+                  return {
+                    data: job
+                      ? { id: job.id, status: job.status, review_decisions: {} }
+                      : null,
+                    error: null,
+                  };
+                },
+              };
+              return builder;
+            },
             update(input: { status: string }) {
               return {
                 eq: () => ({
-                  neq: async () => {
+                  in: async (_column: string, ids: string[]) => {
                     for (const [key, job] of jobs) {
-                      if (job.status !== "complete") jobs.set(key, { ...job, status: input.status });
+                      if (ids.includes(job.id)) jobs.set(key, { ...job, status: input.status });
                     }
                     return { error: null };
                   },
@@ -81,7 +100,16 @@ describe("ingestCsv recovery", () => {
           };
         }
         if (table === "transactions") {
+          const query = {
+            select: () => query,
+            eq: () => query,
+            gte: () => query,
+            lte: () => query,
+            order: () => query,
+            range: async () => ({ data: existingTransactions, error: null }),
+          };
           return {
+            ...query,
             upsert(rows: { content_hash: string; txn_date: string }[]) {
               return {
                 async select() {
@@ -98,6 +126,10 @@ describe("ingestCsv recovery", () => {
         }
         return { insert: async () => ({ error: null }) };
       },
+      rpc: async (name: string) => ({
+        data: name === "acquire_user_write_lock" ? true : true,
+        error: null,
+      }),
     });
   });
 
@@ -124,6 +156,69 @@ describe("ingestCsv recovery", () => {
     expect(runBatchForUser).toHaveBeenLastCalledWith("user-1", {
       affectedMonths: ["2024-04-01"],
     });
+    expect([...jobs.values()][0]?.status).toBe("complete");
+  });
+
+  it("does not complete an import job created after its derivation snapshot", async () => {
+    runBatchForUser.mockImplementationOnce(async () => {
+      jobs.set("late-may", {
+        id: "job-late-may",
+        affected_months: ["2024-05-01"],
+        status: "processing",
+        coverage_confirmed: false,
+      });
+      return { rollups: 1, subscriptions: 0, anomalies: 0, categorized: 0 };
+    });
+
+    await ingestCsv({
+      userId: "user-1",
+      csv: "Date,Description,Amount\n04/15/2024,April coffee,-12.00\n",
+      currency: "USD",
+      dateOrder: "MDY",
+      coverageConfirmed: false,
+    });
+
+    expect(jobs.get("late-may")?.status).toBe("processing");
+    expect([...jobs.values()].find((job) => job.affected_months.includes("2024-04-01"))?.status)
+      .toBe("complete");
+  });
+
+  it("does not persist an uncertain overlap until the user chooses match or keep", async () => {
+    existingTransactions = [{
+      id: "prior-coffee",
+      content_hash: "previous-hash",
+      txn_date: "2024-04-15",
+      amount_cents: -500,
+      currency: "USD",
+      source_account_id: null,
+      merchant_norm: "COFFEE",
+      description: "COFFEE",
+      source_transaction_id: null,
+      import_job_id: "prior-job",
+    }];
+    const args = {
+      userId: "user-1",
+      csv: "Date,Description,Amount\n04/15/2024,COFFEE,-5.00\n04/16/2024,BREAD,-4.00\n",
+      currency: "USD" as const,
+      dateOrder: "MDY" as const,
+      coverageConfirmed: false,
+    };
+    const result = await ingestCsv(args).catch((error: unknown) => error);
+
+    expect(result).toBeInstanceOf(OverlapReviewRequiredError);
+    if (!(result instanceof OverlapReviewRequiredError)) {
+      throw new Error("expected an overlap decision to be required");
+    }
+    expect(jobs.size).toBe(0);
+    expect(savedHashes.size).toBe(0);
+
+    const summary = await ingestCsv({
+      ...args,
+      overlapDecisions: { [result.candidates[0]!.key]: "match-existing" },
+    });
+
+    expect(summary).toMatchObject({ imported: 1, duplicates: 1, possibleDuplicates: 0 });
+    expect(savedHashes.size).toBe(1);
     expect([...jobs.values()][0]?.status).toBe("complete");
   });
 

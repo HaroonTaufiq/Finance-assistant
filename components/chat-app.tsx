@@ -4,7 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useChat } from "@ai-sdk/react";
 import { ArrowUp, Square, Paperclip } from "lucide-react";
-import type { ResultCardData, IngestSummary, ReceiptDraft } from "@/lib/contracts";
+import {
+  manualReceiptDraftFromFailure,
+  ReceiptDraft as ReceiptDraftSchema,
+  type ResultCardData,
+  type IngestSummary,
+  type ReceiptDraft,
+} from "@/lib/contracts";
 import { recordAnalyticsEvent } from "@/lib/analytics/client";
 import { ResultCard } from "./result-card";
 import { ImportSummaryCard } from "./import-summary";
@@ -64,8 +70,18 @@ export function ChatApp({
       form.append("file", file);
       const res = await fetch("/api/receipts", { method: "POST", body: form });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Could not read receipt");
-      setDrafts((d) => [...d, json as ReceiptDraft]);
+      if (!res.ok) {
+        const manualDraft = manualReceiptDraftFromFailure(json);
+        if (manualDraft) {
+          setDrafts((drafts) => [...drafts, manualDraft]);
+          setReceiptError(json.error ?? "Enter the receipt details manually.");
+          return;
+        }
+        throw new Error(json.error ?? "Could not read receipt");
+      }
+      const parsedDraft = ReceiptDraftSchema.safeParse(json);
+      if (!parsedDraft.success) throw new Error("Receipt service returned an invalid draft.");
+      setDrafts((drafts) => [...drafts, parsedDraft.data]);
     } catch (e) {
       setReceiptError(e instanceof Error ? e.message : "Could not read receipt");
     } finally {

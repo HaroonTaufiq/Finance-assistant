@@ -4,6 +4,9 @@ import { z } from "zod";
 import { runBatchForUser } from "@/lib/batch";
 import { getCurrentUser, getServerClient } from "@/lib/db/client";
 import { TransactionKind } from "@/lib/contracts";
+import { UserWriteLockBusyError, withUserWriteLock } from "@/lib/db/user-write-lock";
+
+export const maxDuration = 60;
 
 const Correction = z.object({
   category: z.string().trim().min(1).max(64),
@@ -34,6 +37,8 @@ export async function PATCH(
   }
 
   const supabase = await getServerClient();
+  try {
+    return await withUserWriteLock(supabase, user.id, async () => {
   const { data: row, error: readError } = await supabase
     .from("transactions")
     .select("id, txn_date, amount_cents, transaction_kind, transaction_kind_override")
@@ -131,5 +136,15 @@ export async function PATCH(
     );
   }
 
-  return NextResponse.json({ revisionId: job.id, recomputedMonth: monthStart });
+      return NextResponse.json({ revisionId: job.id, recomputedMonth: monthStart });
+    });
+  } catch (error) {
+    if (error instanceof UserWriteLockBusyError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Could not acquire account write lock" },
+      { status: 503 },
+    );
+  }
 }

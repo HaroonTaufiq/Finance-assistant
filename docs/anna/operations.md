@@ -17,14 +17,19 @@ The service-role key is server-only. Request handlers use the session-bound Supa
 | CSV upload | 4 MiB |
 | CSV data rows | 10,000 |
 | Receipt image | 4 MiB |
-| Chat message | 2,000 characters |
+| Chat request body | 256 KiB, streamed and capped before parsing |
+| Chat messages / context | 40 messages / 20,000 aggregate text characters |
+| Latest chat message | 2,000 characters |
 | Tool-call loop | 5 total steps |
 | Transaction tool result | At most 50 rows |
 | Supabase history scan | 1,000-row pages, ordered scans |
+| Concurrent account writes | One durable 90-second account lease |
+| Concurrent account AI requests | One 45-second lease |
+| AI requests per account | 12 per hour by default; `FINANCE_AI_REQUESTS_PER_HOUR` accepts 1–60 |
 
 The report is calendar-month-only and each account confirms one dataset currency (USD, PKR, EUR, or GBP). No FX conversion is applied. Full-month coverage requires explicit user confirmation plus a completed import whose recorded coverage spans the calendar month. A report remains blocked while a derivation revision is incomplete.
 
-These are not a full rate-limit or abuse-control policy. No server-side request-rate quota or provider spend alert was verified. Add one before enabling public/deployed model traffic.
+The hourly AI quota applies to chat, report explanations, receipt extraction, and model-backed tools. It counts reservations even when a provider call fails. There is no provider-spend alert or hard monetary cap, and model-provider billing remains separate from this request quota. Review the configured quota and provider billing limits before enabling public/deployed model traffic.
 
 ## Local setup, migrations, and recovery
 
@@ -35,7 +40,7 @@ supabase migration up --local
 pnpm dev
 ```
 
-Apply forward migrations; do not use `pnpm db:reset` against a database containing work to preserve. The current local checkout has migrations through `20261028104500_redacted_analytics.sql` applied. In a separate disposable test environment, run:
+Apply forward migrations; do not use `pnpm db:reset` against a database containing work to preserve. This implementation adds atomic rollup replacement/write-lock, import-overlap review, server-side AI quotas, and AI-slot cleanup migrations through `20261028112000_delete_ai_request_slots.sql`. The local verification ran 33 pgTAP assertions with `supabase test db supabase/tests/rls_and_deletion.sql --local`. In a separate disposable test environment, run:
 
 ```sh
 supabase test db supabase/tests/rls_and_deletion.sql --local
