@@ -2,7 +2,7 @@
 
 An AI-driven, multi-user financial companion. Users sign in, bring in their transaction history, and talk to an assistant in plain language about their money — including by uploading a photo of a receipt.
 
-**Repo:** https://github.com/HaroonTaufiq/Finance-assistant · **Live demo:** https://finance-assistant-fawn.vercel.app
+**Repo:** https://github.com/HaroonTaufiq/Finance-assistant · **Live demo:** unavailable; the previously listed deployment currently returns Vercel `DEPLOYMENT_NOT_FOUND`. A replacement must pass a synthetic import/report journey before promotion.
 
 > This README is also the design note. It explains what was built, the decisions behind it, and what was deliberately left out under the 6-hour, single-sitting constraint.
 
