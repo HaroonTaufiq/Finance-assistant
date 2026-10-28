@@ -43,4 +43,16 @@ describe("recurring-charge evidence", () => {
   it("does not detect a candidate from only two observations", () => {
     expect(findRecurringCandidates(observations.slice(0, 2))).toEqual([]);
   });
+
+  it("rounds amount changes to integer cents when the prior median is fractional", () => {
+    const candidate = findRecurringCandidates([
+      { id: "first", txn_date: "2026-01-01", merchant_norm: "PLAN", amount_cents: -100, currency: "USD" },
+      { id: "second", txn_date: "2026-02-01", merchant_norm: "PLAN", amount_cents: -101, currency: "USD" },
+      { id: "third", txn_date: "2026-03-04", merchant_norm: "PLAN", amount_cents: -102, currency: "USD" },
+    ]);
+
+    expect(candidate).toHaveLength(1);
+    expect(candidate[0]?.amount_change_cents).toBe(2);
+    expect(Number.isInteger(candidate[0]?.amount_change_cents)).toBe(true);
+  });
 });

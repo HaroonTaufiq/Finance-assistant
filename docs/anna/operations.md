@@ -29,6 +29,8 @@ The service-role key is server-only. Request handlers use the session-bound Supa
 
 The report is calendar-month-only and each account confirms one dataset currency (USD, PKR, EUR, or GBP). No FX conversion is applied. Full-month coverage requires explicit user confirmation plus a completed import whose recorded coverage spans the calendar month. A report remains blocked while a derivation revision is incomplete.
 
+Receipt-only accounts may establish dataset currency by selecting it in the receipt confirmation draft. If a legacy account has an unset currency and historical transactions contain mixed or missing currencies, the app blocks currency confirmation rather than guessing or converting those rows. This legacy state requires explicit data resolution before reporting.
+
 The hourly AI quota applies to chat, report explanations, receipt extraction, and model-backed tools. It counts reservations even when a provider call fails. There is no provider-spend alert or hard monetary cap, and model-provider billing remains separate from this request quota. Review the configured quota and provider billing limits before enabling public/deployed model traffic.
 
 ## Local setup, migrations, and recovery

@@ -19,6 +19,7 @@ describe("source-less import overlap review", () => {
     const first = parse("Date,Description,Amount\n04/15/2024,COFFEE,-5.00\n");
     const history = dedupeInBatch(userId, first).rows.map((row, index) => ({
       ...row,
+      content_hash: "legacy-fingerprint-dependent-hash",
       id: `existing-${index}`,
       source_transaction_id: null,
       import_job_id: "job-first",

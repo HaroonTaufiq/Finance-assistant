@@ -17,6 +17,7 @@ import { resolveImportOverlaps } from "./dedup";
 import type { ExistingSourceLessTransaction, OverlapDecisions } from "./dedup";
 import { withUserWriteLock } from "@/lib/db/user-write-lock";
 import { fetchAllPages } from "@/lib/db/pagination";
+import { ensureDatasetCurrency } from "@/lib/db/dataset-currency";
 
 /**
  * Orchestrates the write path (PRD-A2): parse → validate → dedup → insert
@@ -78,16 +79,7 @@ export async function ingestCsv(args: {
 
   const affectedMonths = [...new Set(valid.map((row) => `${row.txn_date.slice(0, 7)}-01`))];
   return withUserWriteLock(supabase, userId, async () => {
-    const { data: settings, error: settingsError } = await supabase
-      .from("financial_settings")
-      .select("currency")
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (settingsError) throw new Error(`dataset currency lookup failed: ${settingsError.message}`);
-    const configuredCurrency = (settings as { currency: string } | null)?.currency;
-    if (configuredCurrency && configuredCurrency !== currency) {
-      throw new Error(`This dataset uses ${configuredCurrency}; imports in ${currency} are not supported`);
-    }
+    await ensureDatasetCurrency(supabase, userId, currency);
 
     const { data: priorJob, error: priorJobError } = await supabase
       .from("import_jobs")
@@ -137,13 +129,6 @@ export async function ingestCsv(args: {
       retryJobId: existingJob?.id,
     });
     const { rows, inFileDuplicates, possibleDuplicates, matchedExisting } = resolved;
-
-    if (!configuredCurrency) {
-      const { error } = await supabase
-        .from("financial_settings")
-        .insert({ user_id: userId, currency });
-      if (error) throw new Error(`dataset currency setup failed: ${error.message}`);
-    }
 
     let importJobId: string | null = null;
     if (valid.length > 0) {

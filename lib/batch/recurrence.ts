@@ -107,7 +107,7 @@ export function findRecurringCandidates(
       })),
       uncertainty: "heuristic_pattern_not_verified",
       amount_change_cents:
-        amounts.length > 1 ? amounts[amounts.length - 1]! - previousMedian : null,
+        amounts.length > 1 ? Math.round(amounts[amounts.length - 1]! - previousMedian) : null,
     });
   }
 

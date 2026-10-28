@@ -10,6 +10,11 @@ import {
 } from "@/lib/contracts";
 import { z } from "zod";
 import { UserWriteLockBusyError, withUserWriteLock } from "@/lib/db/user-write-lock";
+import {
+  DatasetCurrencyMismatchError,
+  ensureDatasetCurrency,
+  LegacyMixedCurrencyError,
+} from "@/lib/db/dataset-currency";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -63,24 +68,7 @@ export async function POST(request: NextRequest) {
       if (!parsedCurrency.success) {
         return NextResponse.json({ error: "receipt currency is not supported" }, { status: 422 });
       }
-      const { data: settings, error: settingsError } = await supabase
-        .from("financial_settings")
-        .select("currency")
-        .eq("user_id", user.id)
-        .maybeSingle();
-      if (settingsError) {
-        return NextResponse.json(
-          { error: `could not verify dataset currency: ${settingsError.message}` },
-          { status: 500 },
-        );
-      }
-      const datasetCurrency = (settings as { currency: string | null } | null)?.currency;
-      if (!datasetCurrency || datasetCurrency !== parsedCurrency.data) {
-        return NextResponse.json(
-          { error: "receipt currency must match a previously confirmed dataset currency" },
-          { status: 422 },
-        );
-      }
+      await ensureDatasetCurrency(supabase, user.id, parsedCurrency.data);
 
       if (receipt.status === "confirmed") {
         if (!receipt.linked_transaction_id) {
@@ -188,7 +176,13 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Receipt confirmation failed." },
-      { status: error instanceof UserWriteLockBusyError ? 409 : 503 },
+      {
+        status: error instanceof UserWriteLockBusyError
+          ? 409
+          : error instanceof DatasetCurrencyMismatchError || error instanceof LegacyMixedCurrencyError
+            ? 422
+            : 503,
+      },
     );
   }
 }

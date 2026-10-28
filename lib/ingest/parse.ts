@@ -118,9 +118,6 @@ export function normalizeRow(
     unknown: "unknown",
   };
   const explicitKind = rawKind ? kindAliases[rawKind] : undefined;
-  if (rawKind && !explicitKind) {
-    return { ok: false, raw: row, reason: `unrecognized transaction kind "${rawKind}"; review this row` };
-  }
   const inferredKind = explicitKind ?? categoryKind ?? (amount_cents < 0 ? "expense" : "unknown");
   if (
     (amount_cents < 0 && (inferredKind === "refund" || inferredKind === "income")) ||

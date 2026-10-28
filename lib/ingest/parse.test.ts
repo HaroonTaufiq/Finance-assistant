@@ -106,6 +106,22 @@ describe("normalizeRow column detection", () => {
     expect(errors.every((row) => /conflicts with the amount sign; review/i.test(row.reason))).toBe(true);
   });
 
+  it("falls back to category and sign when a generic bank Type value is unrecognized", () => {
+    const csv =
+      "Date,Description,Amount,Type,Category\n" +
+      "02/10/2024,Card purchase,-20.00,Sale,uncategorized\n" +
+      "02/11/2024,Transfer out,-30.00,Payment,transfer\n" +
+      "02/12/2024,Card credit,10.00,CREDIT,uncategorized\n";
+    const { valid, errors } = parseTransactions(csv);
+
+    expect(errors).toHaveLength(0);
+    expect(valid.map((row) => row.transaction_kind)).toEqual([
+      "expense",
+      "transfer",
+      "unknown",
+    ]);
+  });
+
   it("handles separate debit/credit columns", () => {
     const csv =
       "Date,Description,Debit,Credit\n" +

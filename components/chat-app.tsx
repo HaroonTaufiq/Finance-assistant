@@ -175,10 +175,9 @@ export function ChatApp({
                 }}
                 onExample={(t) => send(t)}
               />
-            ) : importSummary ? (
-              <MonthlyReport embedded />
             ) : (
               <div className="space-y-6">
+                {importSummary && <MonthlyReport embedded />}
                 {messages.length === 0 && drafts.length === 0 && !busy && (
                   <EmptyChat onExample={send} />
                 )}

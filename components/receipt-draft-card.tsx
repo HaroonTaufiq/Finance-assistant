@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { ReceiptDraft } from "@/lib/contracts";
+import { SupportedCurrency, type ReceiptDraft } from "@/lib/contracts";
 import { cn } from "@/lib/utils";
 
 /**
@@ -22,6 +22,7 @@ export function ReceiptDraftCard({
   const [merchant, setMerchant] = useState(d.merchant ?? "");
   const [date, setDate] = useState(d.date ?? "");
   const [total, setTotal] = useState(d.total_cents != null ? (d.total_cents / 100).toFixed(2) : "");
+  const [currency, setCurrency] = useState(d.currency);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflictId, setConflictId] = useState<string | null>(null);
@@ -43,7 +44,7 @@ export function ReceiptDraftCard({
             merchant: merchant || null,
             date,
             total_cents: Math.round(Number(total) * 100),
-            currency: d.currency,
+            currency,
             lineItems: d.lineItems,
             confidence: d.confidence,
           },
@@ -105,6 +106,20 @@ export function ReceiptDraftCard({
             className="tnum w-full bg-transparent text-sm outline-none"
             placeholder="0.00"
           />
+        </Field>
+        <Field label="Currency" low={false}>
+          <select
+            value={currency}
+            onChange={(e) => setCurrency(e.target.value)}
+            className="w-full bg-transparent text-sm outline-none"
+            aria-label="Receipt currency"
+          >
+            {SupportedCurrency.options.map((supportedCurrency) => (
+              <option key={supportedCurrency} value={supportedCurrency}>
+                {supportedCurrency}
+              </option>
+            ))}
+          </select>
         </Field>
       </div>
 
