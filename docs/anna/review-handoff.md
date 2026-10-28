@@ -1,6 +1,6 @@
 # Reviewer handoff
 
-**Date:** 2026-10-28 | **Branch:** `feat/anna-trusted-monthly-review` | **Commit and PR:** pending review artifact creation.
+**Date:** 2026-10-28 | **Branch:** `feat/anna-trusted-monthly-review` | **Commit:** `f9c4809320a452e02bc0458f3c34b298a3c1b075` | **PR:** [#17](https://github.com/HaroonTaufiq/Finance-assistant/pull/17) (open; not merged).
 
 ## Summary
 

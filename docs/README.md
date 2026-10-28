@@ -187,6 +187,14 @@ new schema changes to an existing development dataset.
 
 See `.env.example`. Model selection is per-tier via `ROUTER_MODEL`, `VISION_MODEL`, and `REASONING_MODEL` — change these to swap providers without touching code.
 
+## Finance Assistant — Anna Edition
+
+The current implementation PRD and verification boundary are documented in
+[the PRD](./ANNA-EDITION-PRD.md), [review handoff](./anna/review-handoff.md),
+[architecture gate](./anna/architecture-decision.md), and
+[operations notes](./anna/operations.md). The Anna runtime/auth path is not yet
+configured or verified; the standalone application remains usable.
+
 ---
 
 ## Project structure
