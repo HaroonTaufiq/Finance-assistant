@@ -1,12 +1,12 @@
 # Verification record
 
-Date: 2026-10-28. Verification revision: `a7e74638cc85a4bb4b42f71ac513f23205f3f4e8`. Database checks used the local development stack and synthetic data; no deployed Anna runtime or production data was used.
+Date: 2026-10-28. Verification revision: `57c7ed778b85192bc4fc4db4d54d249ecc7c73df`. Database checks used the local development stack and synthetic data; no deployed Anna runtime or production data was used.
 
 ## Commands and outcomes
 
 | Check | Result |
 |---|---|
-| `pnpm test` | Pass: 21 test files, 77 tests. |
+| `pnpm test` | Pass: 22 test files, 84 tests. |
 | `pnpm lint` | Pass: no ESLint warnings/errors. Next 15 prints the `next lint` deprecation notice. |
 | `pnpm build` | Pass: production build on Next.js 15.5.19; app and API routes compiled. |
 | `pnpm typecheck` | Pass after the production build generated `.next/types`. |
@@ -14,7 +14,7 @@ Date: 2026-10-28. Verification revision: `a7e74638cc85a4bb4b42f71ac513f23205f3f4
 | `supabase migration up --local` | Pass: local schema is up to date through `20261028112000_delete_ai_request_slots.sql`; no reset was run. |
 | `supabase test db supabase/tests/rls_and_deletion.sql --local` | Pass: 33 pgTAP assertions; transaction rolls back its synthetic records. |
 
-The earlier authenticated report/correction browser journey and desktop/mobile sample screenshots were produced against the pre-review-fix baseline. They are historical evidence and were not repeated on `a7e74638cc85a4bb4b42f71ac513f23205f3f4e8`. The review-fix revision adds regressions for exact report values, revision stability, source-less import overlap, atomic month replacement and effective corrections. Re-run the authenticated browser steps below before treating the full journey as re-verified on the latest revision.
+The earlier authenticated report/correction browser journey and desktop/mobile sample screenshots were produced against the pre-review-fix baseline. They are historical evidence and were not repeated on `57c7ed778b85192bc4fc4db4d54d249ecc7c73df`. The review-fix revisions add regressions for exact report values, revision stability, source-less import overlap (including legacy hashes), atomic month replacement, effective corrections, receipt-only currency confirmation and legacy currency-setting concurrency. Re-run the authenticated browser steps below before treating the full journey as re-verified on the latest revision.
 
 ## Reproduce the import-to-recomputation journey
 
@@ -37,7 +37,7 @@ The earlier authenticated report/correction browser journey and desktop/mobile s
 7. Fetch the authenticated `/api/data/export` endpoint. It should return 200 and the transaction's original `category: "groceries"` alongside `category_override: "other"` and `classification_source: "user"`.
 8. Use **Delete finance data** and accept the explicit confirmation. The sign-in account remains valid; `/api/report` returns `hasData: false`, and a fresh export contains zero transactions. New post-deletion sample/QA activity may create new redacted analytics rows.
 
-The original browser run used an isolated synthetic account and exposed the export ordering issue for `subscriptions` (that table has no `created_at`); export now orders subscriptions by `merchant_norm`/`id`. The latest review-fix commit's current evidence is the automated regression suite and local database checks, not a repeated browser session.
+The original browser run used an isolated synthetic account and exposed the export ordering issue for `subscriptions` (that table has no `created_at`); export now orders subscriptions by `merchant_norm`/`id`. The latest follow-up's current evidence is the automated regression suite and local database checks, not a repeated browser session.
 
 ## Other evidence
 
@@ -46,12 +46,13 @@ The original browser run used an isolated synthetic account and exposed the expo
 - `lib/batch/rollups.test.ts` aggregates 1,201 synthetic transactions across the Supabase 1,000-row pagination boundary and checks the exact total. This is a correctness regression, not a production or end-to-end import latency measurement.
 - `lib/agent/chat-request.test.ts` covers streamed body byte limits, message/context limits, malformed turns and UUID conversation identifiers. `lib/contracts/receipts.test.ts` ensures provider failure is explicitly routed to manual entry rather than a success-shaped empty extraction.
 - Prompt boundary tests cover malicious merchant/transaction text as untrusted evidence. Cutback-output tests verify malformed structured output raises an error rather than returning an empty success.
+- Selected follow-up regressions verify receipt-only users can set currency, unset legacy currency is not overwritten under concurrent confirmation, the chat thread remains available beside an embedded report, fractional recurrence deltas remain integer cents, and generic unrecognized bank kinds fall back to category/sign inference.
 - No live model explanation was verified. The deterministic report remains independent of provider availability; direct explanation failures are surfaced with a retry path.
 - Synthetic sample screenshots from the earlier baseline: [desktop](./screenshots/sample-review-desktop.png) and [mobile](./screenshots/sample-review-mobile.png).
 
 ## Performance, cost, and limitations
 
-- The historical authenticated browser import used 6 rows; the review-fix revision has not been browser-benchmarked. The mocked 1,201-row rollup test is not a hardware latency measurement, and no representative p95 benchmark was run.
+- The historical authenticated browser import used 6 rows; the latest follow-up has not been browser-benchmarked. The mocked 1,201-row rollup test is not a hardware latency measurement, and no representative p95 benchmark was run.
 - Local pgTAP reported 33 assertions in under one wall-clock second. This is a correctness test, not a production latency target.
 - No live model/search call was made for this review-fix verification, so no provider charge was incurred. Per-user storage cost, model cost and deployed p95 are unmeasured. The server AI quota is a request limit, not a spend cap or provider-spend alert.
 - Anna CLI/runtime/account are unavailable. There is no Anna bundle, login/persistence/isolation journey or platform review.

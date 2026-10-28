@@ -1,6 +1,6 @@
 # Reviewer handoff
 
-**Date:** 2026-10-28 | **Branch:** `feat/anna-trusted-monthly-review` | **Validated implementation commit:** `a7e74638cc85a4bb4b42f71ac513f23205f3f4e8` | **PR:** [#17](https://github.com/HaroonTaufiq/Finance-assistant/pull/17) (open; not merged). Evidence below was run against that implementation commit; a documentation-only follow-up records this handoff.
+**Date:** 2026-10-28 | **Branch:** `feat/anna-trusted-monthly-review` | **Latest validated code commit:** `57c7ed778b85192bc4fc4db4d54d249ecc7c73df` | **PR:** [#17](https://github.com/HaroonTaufiq/Finance-assistant/pull/17) (open; not merged). Evidence below was run against that code commit; a documentation-only follow-up records this handoff.
 
 ## Summary
 
@@ -19,6 +19,10 @@ No Anna app bundle or per-user Anna persistence path is implemented. No user int
 | REV-5 — ungrounded or stale explanations | Shared report loader exposes currency, gross/refund/net/income, coverage, effective classifications, recurrence evidence and revision. Direct explanation actions pin and recheck revision; transaction tools and cards honor corrected category/kind and currency. | `lib/report/monthly.test.ts`, `lib/report/explanation.test.ts`, `lib/db/queries.test.ts`, `components/result-card.test.ts`. |
 
 Additional recovery safeguards bound streamed chat bodies/context, apply database-backed AI request quotas and concurrency slots, and expose failed receipt extraction as explicit manual entry rather than a success-shaped empty extraction. Receipt confirmation is owner-scoped and idempotent.
+
+## Selected follow-up review comments
+
+Seven selected reviewer comments were checked against the current branch. Five needed additional changes: receipt-only users can choose and confirm a dataset currency; unset legacy settings are updated conditionally and only when existing transactions have no conflicting/missing currencies; the monthly report now renders above, rather than instead of, chat messages and receipt drafts; recurrence amount changes are rounded to integer cents; and unrecognized bank `Type` values fall back to category/sign inference. Two findings were already fixed in the preceding implementation: atomic rollup replacement and source-less occurrence hashes independent of the file fingerprint. The overlap regression now also uses a legacy fingerprint-dependent historical hash to prove decisions rely on identity evidence, not the old hash.
 
 ## Requirement coverage
 
@@ -39,16 +43,16 @@ Additional recovery safeguards bound streamed chat bodies/context, apply databas
 
 Follow [verification.md](./verification.md) for exact commands, local setup, fixture import, expected report values, correction, export, and deletion steps. Do not reset a database containing work to preserve. The synthetic CSV is [monthly-review.csv](./fixtures/monthly-review.csv).
 
-## Verified checks on `a7e74638cc85a4bb4b42f71ac513f23205f3f4e8`
+## Verified checks on `57c7ed778b85192bc4fc4db4d54d249ecc7c73df`
 
-- `pnpm test`: 21 files, 77 tests passed.
+- `pnpm test`: 22 files, 84 tests passed.
 - `pnpm lint`: passed with no ESLint warnings/errors; Next 15 prints the `next lint` deprecation notice.
 - `pnpm build`: production build passed on Next.js 15.5.19, including all app/API routes.
 - `pnpm typecheck`: passed after the production build generated `.next/types`.
 - `git diff --check`: passed.
 - `supabase migration up --local`: local schema up to date through `20261028112000_delete_ai_request_slots.sql`; no database reset.
 - `supabase test db supabase/tests/rls_and_deletion.sql --local`: 33 assertions passed.
-- Latest review-fix revision: no authenticated browser journey or live model call was run. The browser evidence in the earlier handoff applies to the pre-fix baseline only; use the reproduction instructions to repeat it against this commit.
+- No authenticated browser journey or live model call was run for this selected-feedback follow-up. The browser evidence in the earlier handoff applies to the pre-fix baseline only; use the reproduction instructions to repeat it against this commit.
 
 ## Performance, cost, and limitations
 
