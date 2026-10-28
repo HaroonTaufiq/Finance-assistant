@@ -29,3 +29,32 @@ export function monthsInRange(startDate: string, endDate: string): string[] {
 
   return months;
 }
+
+export function fullCalendarMonthsInRange(startDate: string, endDate: string): string[] {
+  const start = new Date(`${startDate}T00:00:00.000Z`);
+  const end = new Date(`${endDate}T00:00:00.000Z`);
+  if (
+    Number.isNaN(start.getTime()) ||
+    Number.isNaN(end.getTime()) ||
+    start.toISOString().slice(0, 10) !== startDate ||
+    end.toISOString().slice(0, 10) !== endDate ||
+    startDate > endDate
+  ) {
+    throw new Error("Report dates must be valid ISO calendar dates");
+  }
+
+  const startMonth = `${startDate.slice(0, 7)}-01`;
+  const endMonth = `${endDate.slice(0, 7)}-01`;
+  const expectedEnd = monthRange(endMonth).end;
+  const lastDay = new Date(`${expectedEnd}T00:00:00.000Z`);
+  lastDay.setUTCDate(lastDay.getUTCDate() - 1);
+  if (startDate !== startMonth || endDate !== lastDay.toISOString().slice(0, 10)) {
+    throw new Error("Monthly reports require a full calendar month range");
+  }
+
+  const months = monthsInRange(startDate, endDate);
+  if (months.length > 36) {
+    throw new Error("Monthly reports are limited to 36 calendar months");
+  }
+  return months;
+}

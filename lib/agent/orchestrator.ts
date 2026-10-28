@@ -14,7 +14,9 @@ import { loadMemory } from "@/lib/memory/rules";
 /**
  * The read-path entrypoint (PRD-B1, SPEC §5). Runs a single AI SDK tool-calling
  * loop on the cheap ROUTER_MODEL, capped at ~4 tool steps. The model routes to
- * typed tools; raw rows never enter its context. Persists user + assistant
+ * typed tools; free-form transaction descriptions and source CSV never enter its
+ * context, while bounded transaction lookups may return date, merchant, category,
+ * amount, and currency after the user asks a specific question. Persists user + assistant
  * messages. Heavy reasoning lives inside individual tools, not here.
  */
 export async function streamAssistantReply(args: {

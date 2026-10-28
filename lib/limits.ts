@@ -5,6 +5,7 @@
  * message instead of an opaque platform error.
  */
 export const MAX_CSV_BYTES = 4 * 1024 * 1024; // 4 MB
+export const MAX_CSV_ROWS = 10_000;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MB
 export const MAX_MESSAGE_CHARS = 2000;
 

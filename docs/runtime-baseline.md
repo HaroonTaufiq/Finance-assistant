@@ -38,19 +38,25 @@ After adding the baseline cases, `pnpm test` passed 4 files / 26 tests,
 
 ## Synthetic fixture expectations
 
-`fixtures/sample-transactions.csv` has 26 data rows: 24 valid rows, 2
-quarantined rows, and 1 in-file duplicate among the valid rows. After
-deduplication, 23 transactions remain. Using signed cents (negative is spend;
-positive is income), the expected monthly totals are:
+`fixtures/sample-transactions.csv` has 26 data rows: 24 valid rows and 2
+quarantined rows. The repeated Whole Foods row has no source transaction ID,
+so the import now preserves both occurrences and flags one as an uncertain
+overlap instead of silently assuming it is a duplicate. The baseline therefore
+contains 24 persisted transactions. Payroll rows are explicitly categorized as
+income; other positive inflows remain unclassified. Expected gross outflows and
+explicit income in signed cents are:
 
 | Month | Spend (cents) | Income (cents) | Unique rows |
 |---|---:|---:|---:|
-| 2024-04 | 181520 | 320000 | 9 |
+| 2024-04 | 189943 | 320000 | 10 |
 | 2024-05 | 290358 | 320000 | 8 |
 | 2024-06 | 281397 | 320000 | 6 |
 
 These are deterministic aggregation expectations, not evidence that the full
-authenticated import/report path ran against the database.
+authenticated import/report path ran against the database. Refunds, transfers,
+income, and unknown inflows are now separate rollup dimensions; do not compare
+their totals to the earlier signed-amount-only baseline without noting this
+intentional semantic correction.
 
 ## Runtime evidence and open blockers
 

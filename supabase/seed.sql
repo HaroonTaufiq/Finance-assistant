@@ -1,0 +1,3 @@
+-- Local development seed data.
+-- The canonical category list is created by the init migration, so nothing is
+-- required here. Add demo rows for a specific user id when you need them.

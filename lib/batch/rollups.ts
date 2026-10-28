@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { monthRange } from "@/lib/months";
+import { fetchAllPages } from "@/lib/db/pagination";
 import { aggregateMonthlyRollups, type RollupAggregate } from "./rollup-math";
 
 /**
@@ -14,19 +15,28 @@ import { aggregateMonthlyRollups, type RollupAggregate } from "./rollup-math";
  */
 
 interface TxnRow {
+  id: string;
   amount_cents: number;
   category: string;
+  category_override: string | null;
   txn_date: string;
+  currency: string;
+  transaction_kind: "expense" | "refund" | "income" | "transfer" | "unknown";
+  transaction_kind_override: "expense" | "refund" | "income" | "transfer" | "unknown" | null;
 }
 
 async function allMonths(supabase: SupabaseClient, userId: string): Promise<string[]> {
-  const { data, error } = await supabase
+  const rows = await fetchAllPages(
+    supabase
     .from("transactions")
     .select("txn_date")
-    .eq("user_id", userId);
-  if (error) throw new Error(`rollups: month scan failed: ${error.message}`);
+    .eq("user_id", userId)
+    .order("txn_date", { ascending: true })
+    .order("id", { ascending: true }),
+    "rollups: month scan failed",
+  );
   const months = new Set<string>();
-  for (const r of (data as { txn_date: string }[] | null) ?? []) {
+  for (const r of rows as { txn_date: string }[]) {
     months.add(`${r.txn_date.slice(0, 7)}-01`);
   }
   return [...months];
@@ -42,21 +52,46 @@ export async function recomputeRollups(
 
   for (const monthStart of targets) {
     const { start, end } = monthRange(monthStart);
-    const { data, error } = await supabase
+    const data = await fetchAllPages(
+      supabase
       .from("transactions")
-      .select("amount_cents, category, txn_date")
+      .select("id, amount_cents, category, category_override, txn_date, currency, transaction_kind, transaction_kind_override")
       .eq("user_id", userId)
       .gte("txn_date", start)
-      .lt("txn_date", end);
-    if (error) throw new Error(`rollups: fetch ${monthStart} failed: ${error.message}`);
+      .lt("txn_date", end)
+      .order("txn_date", { ascending: true })
+      .order("id", { ascending: true }),
+      `rollups: fetch ${monthStart} failed`,
+    );
+
+    const transactions = data as TxnRow[];
+    const currencies = new Set(transactions.map((row) => row.currency));
+    if (currencies.size > 1) {
+      throw new Error(`rollups: mixed currencies in ${monthStart}; refusing to combine`);
+    }
+
+    const [currency] = currencies;
+    if (!currency) {
+      const { error: deleteError } = await supabase
+        .from("rollups")
+        .delete()
+        .eq("user_id", userId)
+        .eq("period_type", "month")
+        .eq("period_start", monthStart);
+      if (deleteError) {
+        throw new Error(`rollups: clear empty month ${monthStart} failed: ${deleteError.message}`);
+      }
+      continue;
+    }
 
     const aggregates = aggregateMonthlyRollups(
-      ((data as TxnRow[] | null) ?? []).map(({ amount_cents, category }) => ({
+      transactions.map(({ amount_cents, category, category_override, transaction_kind, transaction_kind_override }) => ({
         amount_cents,
-        category,
+        category: category_override ?? category,
+        kind: transaction_kind_override ?? transaction_kind,
       })),
     );
-    const rows = aggregates.map((aggregate) => toRow(userId, monthStart, aggregate));
+    const rows = aggregates.map((aggregate) => toRow(userId, monthStart, currency, aggregate));
 
     const { error: upErr } = await supabase
       .from("rollups")
@@ -68,14 +103,23 @@ export async function recomputeRollups(
   return written;
 }
 
-function toRow(userId: string, periodStart: string, aggregate: RollupAggregate) {
+function toRow(
+  userId: string,
+  periodStart: string,
+  currency: string,
+  aggregate: RollupAggregate,
+) {
   return {
     user_id: userId,
     period_type: "month",
     period_start: periodStart,
+    currency,
     category: aggregate.category,
     total_spend_cents: aggregate.total_spend_cents,
+    total_refund_cents: aggregate.total_refund_cents,
+    net_spend_cents: aggregate.net_spend_cents,
     total_income_cents: aggregate.total_income_cents,
+    total_unknown_inflow_cents: aggregate.total_unknown_inflow_cents,
     txn_count: aggregate.txn_count,
   };
 }

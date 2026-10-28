@@ -1,0 +1,111 @@
+begin;
+
+select plan(19);
+
+insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at)
+values
+  ('a0000000-0000-4000-8000-000000000001', 'authenticated', 'authenticated', 'anna-a@example.test', '', now(), now(), now()),
+  ('b0000000-0000-4000-8000-000000000002', 'authenticated', 'authenticated', 'anna-b@example.test', '', now(), now(), now());
+
+insert into public.financial_settings (user_id, currency)
+values
+  ('a0000000-0000-4000-8000-000000000001', 'USD'),
+  ('b0000000-0000-4000-8000-000000000002', 'USD');
+
+insert into public.import_jobs (id, user_id, file_fingerprint, status, affected_months, row_count)
+values
+  ('a1000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001', 'test-a', 'complete', '{2024-01-01}', 1),
+  ('b1000000-0000-4000-8000-000000000002', 'b0000000-0000-4000-8000-000000000002', 'test-b', 'complete', '{2024-01-01}', 1);
+
+insert into public.transactions (id, user_id, txn_date, amount_cents, currency, transaction_kind, category, source, content_hash, import_job_id)
+values
+  ('a2000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001', '2024-01-05', -100, 'USD', 'expense', 'dining', 'csv', 'test-a', 'a1000000-0000-4000-8000-000000000001'),
+  ('b2000000-0000-4000-8000-000000000002', 'b0000000-0000-4000-8000-000000000002', '2024-01-05', -200, 'USD', 'expense', 'dining', 'csv', 'test-b', 'b1000000-0000-4000-8000-000000000002');
+
+insert into public.rollups (user_id, period_type, period_start, currency, category, total_spend_cents, net_spend_cents)
+values
+  ('a0000000-0000-4000-8000-000000000001', 'month', '2024-01-01', 'USD', '__all__', 100, 100),
+  ('b0000000-0000-4000-8000-000000000002', 'month', '2024-01-01', 'USD', '__all__', 200, 200);
+
+insert into public.subscriptions (user_id, merchant_norm, avg_amount_cents, last_seen, status)
+values
+  ('a0000000-0000-4000-8000-000000000001', 'STREAM-A', 100, '2024-01-05', 'dismissed'),
+  ('b0000000-0000-4000-8000-000000000002', 'STREAM-B', 200, '2024-01-05', 'active');
+
+insert into public.anomalies (user_id, transaction_id, type, score, reason)
+values
+  ('a0000000-0000-4000-8000-000000000001', 'a2000000-0000-4000-8000-000000000001', 'new_merchant', 1, 'synthetic'),
+  ('b0000000-0000-4000-8000-000000000002', 'b2000000-0000-4000-8000-000000000002', 'new_merchant', 1, 'synthetic');
+
+insert into public.budgets (user_id, category, limit_cents)
+values
+  ('a0000000-0000-4000-8000-000000000001', 'dining', 1000),
+  ('b0000000-0000-4000-8000-000000000002', 'dining', 2000);
+
+insert into public.user_memory (user_id, kind, type, params)
+values
+  ('a0000000-0000-4000-8000-000000000001', 'fact', 'income_day', '{"day":1}'),
+  ('b0000000-0000-4000-8000-000000000002', 'fact', 'income_day', '{"day":2}');
+
+insert into public.conversations (id, user_id, title)
+values
+  ('a3000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001', 'A'),
+  ('b3000000-0000-4000-8000-000000000002', 'b0000000-0000-4000-8000-000000000002', 'B');
+
+insert into public.messages (conversation_id, user_id, role, content)
+values
+  ('a3000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001', 'user', 'synthetic A'),
+  ('b3000000-0000-4000-8000-000000000002', 'b0000000-0000-4000-8000-000000000002', 'user', 'synthetic B');
+
+insert into public.receipts (user_id, storage_path, status)
+values
+  ('a0000000-0000-4000-8000-000000000001', 'test/a.png', 'pending'),
+  ('b0000000-0000-4000-8000-000000000002', 'test/b.png', 'pending');
+
+insert into public.ingest_errors (user_id, raw_row, reason)
+values
+  ('a0000000-0000-4000-8000-000000000001', '{"row":"a"}', 'synthetic'),
+  ('b0000000-0000-4000-8000-000000000002', '{"row":"b"}', 'synthetic');
+
+insert into public.analytics_events (user_id, user_hash, event_key, event_name, mode)
+values
+  ('a0000000-0000-4000-8000-000000000001', repeat('a', 64), 'test-a', 'report_completed', 'qa'),
+  ('b0000000-0000-4000-8000-000000000002', repeat('b', 64), 'test-b', 'report_completed', 'qa');
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', 'a0000000-0000-4000-8000-000000000001', true);
+select set_config('request.jwt.claim.role', 'authenticated', true);
+select is((select count(*)::integer from public.transactions), 1, 'account A sees only its transactions');
+select is((select count(*)::integer from public.analytics_events), 1, 'account A sees only its analytics');
+insert into public.subscriptions (user_id, merchant_norm, avg_amount_cents, last_seen, lifecycle_status)
+values ('a0000000-0000-4000-8000-000000000001', 'STREAM-A', 150, '2024-02-05', 'active')
+on conflict (user_id, merchant_norm) do update
+set avg_amount_cents = excluded.avg_amount_cents,
+    last_seen = excluded.last_seen,
+    lifecycle_status = excluded.lifecycle_status;
+select is((select status from public.subscriptions where merchant_norm = 'STREAM-A'), 'dismissed', 'subscription recomputation preserves the user review state');
+select lives_ok('select public.delete_my_financial_data()', 'account A can delete its finance data');
+select is((select count(*)::integer from public.transactions), 0, 'account A transactions are deleted');
+select is((select count(*)::integer from public.import_jobs), 0, 'account A import history is deleted');
+select is((select count(*)::integer from public.financial_settings), 0, 'account A settings are deleted');
+select is((select count(*)::integer from public.rollups), 0, 'account A rollups are deleted');
+select is((select count(*)::integer from public.subscriptions), 0, 'account A recurring reviews are deleted');
+select is((select count(*)::integer from public.anomalies), 0, 'account A anomalies are deleted');
+select is((select count(*)::integer from public.budgets), 0, 'account A budgets are deleted');
+select is((select count(*)::integer from public.user_memory), 0, 'account A memories are deleted');
+select is((select count(*)::integer from public.conversations), 0, 'account A conversations are deleted');
+select is((select count(*)::integer from public.messages), 0, 'account A messages are deleted');
+select is((select count(*)::integer from public.receipts), 0, 'account A receipt records are deleted');
+select is((select count(*)::integer from public.ingest_errors), 0, 'account A import errors are deleted');
+select is((select count(*)::integer from public.analytics_events), 0, 'account A analytics are deleted');
+reset role;
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', 'b0000000-0000-4000-8000-000000000002', true);
+select set_config('request.jwt.claim.role', 'authenticated', true);
+select is((select count(*)::integer from public.transactions), 1, 'account B data survives account A deletion');
+select is((select count(*)::integer from public.analytics_events), 1, 'account B analytics survive account A deletion');
+reset role;
+
+select * from finish();
+rollback;

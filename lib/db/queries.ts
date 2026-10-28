@@ -2,7 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import * as C from "@/lib/contracts";
-import { monthsInRange } from "@/lib/months";
+import { fullCalendarMonthsInRange } from "@/lib/months";
 
 /**
  * Parameterized, bounded query functions backing the tools (PRD-B1).
@@ -31,19 +31,39 @@ type Exclusion = { category: string; from: string };
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
+async function assertDerivedDataReady(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<void> {
+  const { data, error } = await supabase
+    .from("import_jobs")
+    .select("id, status")
+    .eq("user_id", userId)
+    .neq("status", "complete")
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`report readiness check failed: ${error.message}`);
+  if (data) {
+    throw new Error("Report is not current because an import needs recovery; retry that import first");
+  }
+}
+
 // ---- getSpending: reads precomputed rollups (no raw rows) ------------------
 export async function getSpending(
   supabase: SupabaseClient,
   userId: string,
   input: SpendingIn,
 ): Promise<SpendingOut> {
-  const months = monthsInRange(input.startDate, input.endDate);
+  await assertDerivedDataReady(supabase, userId);
+  const months = fullCalendarMonthsInRange(input.startDate, input.endDate);
   const perCategory = input.groupBy === "category";
   const baseCat = input.category ?? "__all__";
 
   let query = supabase
     .from("rollups")
-    .select("period_start, category, total_spend_cents")
+    .select(
+      "period_start, category, total_spend_cents, total_refund_cents, net_spend_cents, total_income_cents, total_unknown_inflow_cents, currency",
+    )
     .eq("user_id", userId)
     .eq("period_type", "month")
     .in("period_start", months);
@@ -52,11 +72,35 @@ export async function getSpending(
   const { data, error } = await query;
   if (error) throw new Error(`getSpending failed: ${error.message}`);
 
-  const rows = (data as { period_start: string; category: string; total_spend_cents: number }[] | null) ?? [];
+  const rows = (data as {
+    period_start: string;
+    category: string;
+    total_spend_cents: number;
+    total_refund_cents: number;
+    net_spend_cents: number;
+    total_income_cents: number;
+    total_unknown_inflow_cents: number;
+    currency: string;
+  }[] | null) ?? [];
+  if (rows.some((row) => !row.currency)) {
+    throw new Error("getSpending failed: dataset currency requires review before reporting");
+  }
+  const currencies = new Set(rows.map((row) => row.currency));
+  if (currencies.size > 1) {
+    throw new Error("getSpending failed: mixed currencies in the selected dataset");
+  }
   let total = 0;
+  let refunds = 0;
+  let netSpend = 0;
+  let income = 0;
+  let unknownInflows = 0;
   const grouped = new Map<string, number>();
   for (const r of rows) {
     total += r.total_spend_cents;
+    refunds += r.total_refund_cents;
+    netSpend += r.net_spend_cents;
+    income += r.total_income_cents;
+    unknownInflows += r.total_unknown_inflow_cents;
     if (input.groupBy) {
       const key = input.groupBy === "month" ? r.period_start : r.category;
       grouped.set(key, (grouped.get(key) ?? 0) + r.total_spend_cents);
@@ -71,7 +115,12 @@ export async function getSpending(
 
   return {
     total_cents: total,
-    currency: "USD",
+    gross_outflows_cents: total,
+    refunds_cents: refunds,
+    net_spend_cents: netSpend,
+    total_income_cents: income,
+    unknown_inflows_cents: unknownInflows,
+    currency: [...currencies][0] ?? null,
     period: { start: input.startDate, end: input.endDate },
     groupBy: input.groupBy ?? null,
     breakdown,
@@ -130,23 +179,28 @@ export async function getTrend(
   userId: string,
   input: TrendIn,
 ): Promise<TrendOut> {
+  await assertDerivedDataReady(supabase, userId);
   const cat = input.category ?? "__all__";
   const { data, error } = await supabase
     .from("rollups")
-    .select("period_start, total_spend_cents")
+    .select("period_start, total_spend_cents, net_spend_cents")
     .eq("user_id", userId)
     .eq("period_type", "month")
     .eq("category", cat)
     .order("period_start", { ascending: true });
   if (error) throw new Error(`getTrend failed: ${error.message}`);
 
-  const all = (data as { period_start: string; total_spend_cents: number }[] | null) ?? [];
+  const all = (data as {
+    period_start: string;
+    total_spend_cents: number;
+    net_spend_cents: number;
+  }[] | null) ?? [];
   const series = all.slice(-input.periods);
-  const current = series.length > 0 ? series[series.length - 1]!.total_spend_cents : 0;
+  const current = series.length > 0 ? series[series.length - 1]!.net_spend_cents : 0;
   const prior = series.slice(0, -1);
   const average =
     prior.length > 0
-      ? Math.round(prior.reduce((a, b) => a + b.total_spend_cents, 0) / prior.length)
+      ? Math.round(prior.reduce((a, b) => a + b.net_spend_cents, 0) / prior.length)
       : 0;
   const delta_pct =
     average > 0 ? Number((((current - average) / average) * 100).toFixed(1)) : null;
@@ -165,21 +219,31 @@ export async function getSubscriptions(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<SubsOut> {
+  await assertDerivedDataReady(supabase, userId);
   const { data, error } = await supabase
     .from("subscriptions")
-    .select("merchant_norm, cadence_days, avg_amount_cents, next_expected, confidence")
+    .select(
+      "merchant_norm, status, cadence_days, avg_amount_cents, next_expected, confidence, currency, occurrence_count, evidence, uncertainty, amount_change_cents",
+    )
     .eq("user_id", userId)
-    .eq("status", "active")
+    .in("status", ["active", "confirmed"])
+    .eq("lifecycle_status", "active")
     .order("confidence", { ascending: false });
   if (error) throw new Error(`getSubscriptions failed: ${error.message}`);
 
   return {
     subscriptions: ((data as SubsOut["subscriptions"] | null) ?? []).map((s) => ({
       merchant_norm: s.merchant_norm,
+      status: s.status,
       cadence_days: s.cadence_days,
       avg_amount_cents: s.avg_amount_cents,
       next_expected: s.next_expected,
       confidence: s.confidence,
+      currency: s.currency,
+      occurrence_count: s.occurrence_count,
+      evidence: s.evidence,
+      uncertainty: s.uncertainty,
+      amount_change_cents: s.amount_change_cents,
     })),
   };
 }
@@ -190,6 +254,7 @@ export async function getAnomalies(
   userId: string,
   input: AnomIn,
 ): Promise<AnomOut> {
+  await assertDerivedDataReady(supabase, userId);
   let query = supabase
     .from("anomalies")
     .select("type, score, reason")
@@ -241,13 +306,13 @@ async function monthSpend(
 ): Promise<number> {
   const { data } = await supabase
     .from("rollups")
-    .select("total_spend_cents")
+    .select("net_spend_cents")
     .eq("user_id", userId)
     .eq("period_type", "month")
     .eq("period_start", month)
     .eq("category", category)
     .maybeSingle();
-  return (data as { total_spend_cents: number } | null)?.total_spend_cents ?? 0;
+  return (data as { net_spend_cents: number } | null)?.net_spend_cents ?? 0;
 }
 
 async function statusFor(
@@ -346,6 +411,7 @@ export async function getRollupContext(
   userId: string,
   months = 6,
 ): Promise<{ period_start: string; category: string; total_spend_cents: number; total_income_cents: number }[]> {
+  await assertDerivedDataReady(supabase, userId);
   const { data, error } = await supabase
     .from("rollups")
     .select("period_start, category, total_spend_cents, total_income_cents")

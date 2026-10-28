@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getCurrentUser } from "@/lib/db/client";
 import { ingestCsv } from "@/lib/ingest/pipeline";
 import { MAX_CSV_BYTES, formatBytes } from "@/lib/limits";
+import { SupportedCurrency as SupportedCurrencySchema } from "@/lib/contracts";
+import type { CsvColumnField, CsvColumnMapping } from "@/lib/ingest/parse";
 
 export const runtime = "nodejs"; // pipeline uses node:crypto + service code
 
@@ -16,6 +18,10 @@ export async function POST(request: NextRequest) {
   }
 
   let csv: string;
+  let currency: string | null;
+  let dateOrder: string | null;
+  let coverageConfirmed: boolean;
+  let columnMappingInput: string | null;
   const contentType = request.headers.get("content-type") ?? "";
   try {
     if (contentType.includes("multipart/form-data")) {
@@ -25,9 +31,17 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: "no file provided" }, { status: 400 });
       }
       csv = await file.text();
+      currency = form.get("currency")?.toString() ?? null;
+      dateOrder = form.get("dateOrder")?.toString() ?? null;
+      coverageConfirmed = form.get("coverageConfirmed") === "true";
+      columnMappingInput = form.get("columnMapping")?.toString() ?? null;
     } else {
       // Allow a raw text/csv body too (handy for the mock-bank path / tests).
       csv = await request.text();
+      currency = request.headers.get("x-finance-currency");
+      dateOrder = request.headers.get("x-finance-date-order");
+      coverageConfirmed = request.headers.get("x-finance-coverage-confirmed") === "true";
+      columnMappingInput = request.headers.get("x-finance-column-mapping");
     }
   } catch {
     return NextResponse.json({ error: "could not read upload" }, { status: 400 });
@@ -35,6 +49,23 @@ export async function POST(request: NextRequest) {
 
   if (!csv.trim()) {
     return NextResponse.json({ error: "empty file" }, { status: 400 });
+  }
+  let columnMapping: CsvColumnMapping | undefined;
+  try {
+    columnMapping = parseColumnMapping(columnMappingInput);
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "invalid column mapping" },
+      { status: 400 },
+    );
+  }
+
+  const parsedCurrency = SupportedCurrencySchema.safeParse(currency);
+  if (!parsedCurrency.success) {
+    return NextResponse.json({ error: "Choose a supported currency before importing" }, { status: 400 });
+  }
+  if (dateOrder !== "MDY" && dateOrder !== "DMY") {
+    return NextResponse.json({ error: "Choose the date order shown by your CSV before importing" }, { status: 400 });
   }
 
   if (Buffer.byteLength(csv, "utf8") > MAX_CSV_BYTES) {
@@ -45,10 +76,54 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const summary = await ingestCsv({ userId: user.id, csv });
+    const summary = await ingestCsv({
+      userId: user.id,
+      csv,
+      currency: parsedCurrency.data,
+      dateOrder,
+      coverageConfirmed,
+      columnMapping,
+    });
     return NextResponse.json(summary);
   } catch (err) {
     const message = err instanceof Error ? err.message : "ingest failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = message.startsWith("CSV exceeds") ? 413 : message.includes("currency") ? 422 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
+}
+
+function parseColumnMapping(value: string | null): CsvColumnMapping | undefined {
+  if (!value) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("Column mapping must be valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Column mapping must be an object");
+  }
+
+  const fields: CsvColumnField[] = [
+    "date",
+    "amount",
+    "debit",
+    "credit",
+    "description",
+    "merchant",
+    "category",
+    "currency",
+    "transactionKind",
+    "account",
+    "transactionId",
+  ];
+  const mapping: CsvColumnMapping = {};
+  for (const [fieldName, header] of Object.entries(parsed)) {
+    const field = fields.find((candidate) => candidate === fieldName);
+    if (!field || typeof header !== "string") {
+      throw new Error("Column mapping contains an unsupported field");
+    }
+    if (header) mapping[field] = header;
+  }
+  return mapping;
 }

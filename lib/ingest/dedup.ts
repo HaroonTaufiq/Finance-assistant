@@ -7,13 +7,23 @@ import type { NormalizedTransaction } from "@/lib/contracts";
  * same CSV is a no-op. Hash is stable across runs for identical input.
  */
 export function contentHash(userId: string, txn: NormalizedTransaction): string {
-  const key = [
-    userId,
-    txn.txn_date,
-    txn.amount_cents,
-    txn.merchant_norm ?? "",
-    txn.description ?? "",
-  ].join("|");
+  const key = txn.source_transaction_id
+    ? [
+        userId,
+        txn.source_account_id ?? "",
+        txn.currency,
+        "source-id",
+        txn.source_transaction_id,
+      ].join("|")
+    : [
+        userId,
+        txn.txn_date,
+        txn.amount_cents,
+        txn.currency,
+        txn.source_account_id ?? "",
+        txn.merchant_norm ?? "",
+        txn.description ?? "",
+      ].join("|");
   return createHash("sha256").update(key).digest("hex");
 }
 
@@ -24,13 +34,28 @@ export function contentHash(userId: string, txn: NormalizedTransaction): string 
 export function dedupeInBatch(
   userId: string,
   txns: NormalizedTransaction[],
-): { rows: (NormalizedTransaction & { content_hash: string })[]; inFileDuplicates: number } {
+  importFingerprint = createHash("sha256").update(JSON.stringify(txns)).digest("hex"),
+): {
+  rows: (NormalizedTransaction & { content_hash: string })[];
+  inFileDuplicates: number;
+  possibleDuplicates: number;
+} {
   const seen = new Set<string>();
+  const rowOccurrences = new Map<string, number>();
   const rows: (NormalizedTransaction & { content_hash: string })[] = [];
   let inFileDuplicates = 0;
+  let possibleDuplicates = 0;
 
   for (const txn of txns) {
-    const hash = contentHash(userId, txn);
+    const stableHash = contentHash(userId, txn);
+    const occurrence = rowOccurrences.get(stableHash) ?? 0;
+    rowOccurrences.set(stableHash, occurrence + 1);
+    if (!txn.source_transaction_id && occurrence > 0) possibleDuplicates += 1;
+    const hash = txn.source_transaction_id
+      ? stableHash
+      : createHash("sha256")
+          .update(`${stableHash}|${importFingerprint}|${occurrence}`)
+          .digest("hex");
     if (seen.has(hash)) {
       inFileDuplicates++;
       continue;
@@ -39,5 +64,5 @@ export function dedupeInBatch(
     rows.push({ ...txn, content_hash: hash });
   }
 
-  return { rows, inFileDuplicates };
+  return { rows, inFileDuplicates, possibleDuplicates };
 }

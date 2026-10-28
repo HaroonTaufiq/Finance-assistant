@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { formatCents } from "@/lib/utils";
+import { fetchAllPages } from "@/lib/db/pagination";
 
 /**
  * Out-of-pattern flags (PRD-A3, SPEC §7). Ships a z-score / rolling-baseline
@@ -18,8 +19,17 @@ interface Row {
   id: string;
   amount_cents: number;
   category: string;
+  category_override: string | null;
   merchant_norm: string | null;
   txn_date: string;
+  transaction_kind: "expense" | "refund" | "income" | "transfer" | "unknown";
+  transaction_kind_override:
+    | "expense"
+    | "refund"
+    | "income"
+    | "transfer"
+    | "unknown"
+    | null;
 }
 
 const Z_THRESHOLD = 3;
@@ -41,22 +51,28 @@ export async function scoreAnomalies(
     .eq("status", "new");
   if (delErr) throw new Error(`anomalies: clear failed: ${delErr.message}`);
 
-  const { data, error } = await supabase
+  const rows = await fetchAllPages(
+    supabase
     .from("transactions")
-    .select("id, amount_cents, category, merchant_norm, txn_date")
+    .select("id, amount_cents, category, category_override, merchant_norm, txn_date, transaction_kind, transaction_kind_override")
     .eq("user_id", userId)
-    .lt("amount_cents", 0);
-  if (error) throw new Error(`anomalies: fetch failed: ${error.message}`);
+    .lt("amount_cents", 0)
+    .order("txn_date", { ascending: true })
+    .order("id", { ascending: true }),
+    "anomalies: fetch failed",
+  );
 
-  const rows = (data as Row[] | null) ?? [];
-  if (rows.length === 0) return 0;
+  const transactions = (rows as Row[])
+    .filter((row) => (row.transaction_kind_override ?? row.transaction_kind) === "expense")
+    .map((row) => ({ ...row, category: row.category_override ?? row.category }));
+  if (transactions.length === 0) return 0;
 
-  const latestMonth = rows.reduce((m, r) => (monthOf(r.txn_date) > m ? monthOf(r.txn_date) : m), "");
+  const latestMonth = transactions.reduce((m, r) => (monthOf(r.txn_date) > m ? monthOf(r.txn_date) : m), "");
   const flags: Record<string, unknown>[] = [];
 
   // ---- amount_spike: per-category z-score --------------------------------
   const byCat = new Map<string, Row[]>();
-  for (const r of rows) {
+  for (const r of transactions) {
     const list = byCat.get(r.category) ?? [];
     list.push(r);
     byCat.set(r.category, list);
@@ -85,7 +101,7 @@ export async function scoreAnomalies(
 
   // ---- new_merchant: first-ever charge lands in the latest month ----------
   const firstSeen = new Map<string, Row>();
-  for (const r of rows) {
+  for (const r of transactions) {
     if (!r.merchant_norm) continue;
     const prev = firstSeen.get(r.merchant_norm);
     if (!prev || r.txn_date < prev.txn_date) firstSeen.set(r.merchant_norm, r);
@@ -104,7 +120,7 @@ export async function scoreAnomalies(
 
   // ---- category_spike: latest-month total far above prior average ---------
   const catMonthTotals = new Map<string, Map<string, number>>();
-  for (const r of rows) {
+  for (const r of transactions) {
     const m = monthOf(r.txn_date);
     const inner = catMonthTotals.get(r.category) ?? new Map<string, number>();
     inner.set(m, (inner.get(m) ?? 0) + Math.abs(r.amount_cents));

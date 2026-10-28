@@ -166,6 +166,23 @@ pnpm dev
 
 > **Note:** Supabase's free tier pauses a project after ~1 week of inactivity. If the demo looks empty or errors on load, resume the project in the Supabase dashboard.
 
+### Local database (Docker)
+
+No hosted project is required — the repo ships a local Supabase setup (Postgres, Auth,
+Storage, Studio). Requires Docker and the Supabase CLI.
+
+```bash
+pnpm db:start          # boots the stack and applies supabase/migrations/
+supabase status -o env # API_URL / ANON_KEY / SERVICE_ROLE_KEY for .env.local
+```
+
+Local ports are shifted to `5433x` (API `54331`, DB `54332`, Studio `54333`) so this
+stack can run alongside another local Supabase project. `docs/schema.sql` is the current schema snapshot; ordered files in
+`supabase/migrations/` are the source of schema history. Keep the snapshot aligned
+with the final migrated schema. `pnpm db:reset` **deletes all local database data**
+before applying migrations; use it only for a disposable database, never to apply
+new schema changes to an existing development dataset.
+
 ### Environment variables
 
 See `.env.example`. Model selection is per-tier via `ROUTER_MODEL`, `VISION_MODEL`, and `REASONING_MODEL` — change these to swap providers without touching code.

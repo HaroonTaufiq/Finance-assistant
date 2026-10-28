@@ -4,6 +4,7 @@ import { runBatchForUser } from "@/lib/batch";
 import { contentHash } from "@/lib/ingest/dedup";
 import {
   ReceiptExtraction,
+  SupportedCurrency as SupportedCurrencySchema,
   normalizeMerchant,
   type NormalizedTransaction,
 } from "@/lib/contracts";
@@ -40,6 +41,25 @@ export async function POST(request: NextRequest) {
   }
 
   const supabase = await getServerClient();
+  const parsedCurrency = SupportedCurrencySchema.safeParse(fields.currency);
+  if (!parsedCurrency.success) {
+    return NextResponse.json({ error: "receipt currency is not supported" }, { status: 422 });
+  }
+  const { data: settings, error: settingsError } = await supabase
+    .from("financial_settings")
+    .select("currency")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (settingsError) {
+    return NextResponse.json({ error: `could not verify dataset currency: ${settingsError.message}` }, { status: 500 });
+  }
+  const datasetCurrency = (settings as { currency: string | null } | null)?.currency;
+  if (!datasetCurrency || datasetCurrency !== parsedCurrency.data) {
+    return NextResponse.json(
+      { error: "receipt currency must match a previously confirmed dataset currency" },
+      { status: 422 },
+    );
+  }
   const merchantNorm = normalizeMerchant(fields.merchant);
   const amountCents = -Math.abs(fields.total_cents); // a receipt is spend
 
@@ -65,11 +85,14 @@ export async function POST(request: NextRequest) {
   const txn: NormalizedTransaction = {
     txn_date: fields.date,
     amount_cents: amountCents,
-    currency: fields.currency,
+    currency: parsedCurrency.data,
+    transaction_kind: "expense",
     merchant_raw: fields.merchant,
     merchant_norm: merchantNorm,
     category: "uncategorized",
     description: fields.merchant,
+    source_account_id: null,
+    source_transaction_id: null,
     source: "receipt",
     metadata: { receiptId, lineItems: fields.lineItems },
   };

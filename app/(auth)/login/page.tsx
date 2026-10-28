@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { getBrowserClient } from "@/lib/db/browser";
+import { recordAnalyticsEvent } from "@/lib/analytics/client";
 
 type Mode = "signin" | "signup";
 
@@ -28,6 +29,11 @@ export default function LoginPage() {
         if (error) throw error;
         // If email confirmation is disabled, a session is returned immediately.
         if (data.session) {
+          void recordAnalyticsEvent({
+            eventKey: `sign-in:${crypto.randomUUID()}`,
+            eventName: "sign_in",
+            mode: "personal",
+          });
           router.push("/chat");
           router.refresh();
           return;
@@ -37,6 +43,11 @@ export default function LoginPage() {
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
+        void recordAnalyticsEvent({
+          eventKey: `sign-in:${crypto.randomUUID()}`,
+          eventName: "sign_in",
+          mode: "personal",
+        });
         router.push("/chat");
         router.refresh();
       }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import type { IngestSummary } from "@/lib/contracts";
 
 /**
@@ -20,6 +21,11 @@ export function ImportSummaryCard({ summary }: { summary: IngestSummary }) {
             <span className="text-text-faint">·</span>
             <span className="text-text-muted">{summary.duplicates} duplicates</span>
           </>
+        )}
+        {summary.possibleDuplicates > 0 && (
+          <span className="text-text-muted">
+            {summary.possibleDuplicates} identical rows kept for your review
+          </span>
         )}
       </div>
       {summary.reasons.length > 0 && (
@@ -42,6 +48,9 @@ export function ImportSummaryCard({ summary }: { summary: IngestSummary }) {
           )}
         </div>
       )}
+      <Link href="/report" className="mt-3 inline-block text-xs text-accent hover:underline">
+        Open the monthly report
+      </Link>
     </div>
   );
 }

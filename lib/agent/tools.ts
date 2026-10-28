@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getServerClient } from "@/lib/db/client";
 import { reasoningModel } from "./models";
 import { SYNTHESIS_SYSTEM, MERCHANT_SYSTEM } from "./prompts";
+import { parseCutbacksOutput } from "./cutbacks";
 import { webSearch } from "@/lib/search/web";
 import * as Q from "@/lib/db/queries";
 import * as C from "@/lib/contracts";
@@ -115,18 +116,7 @@ export function buildToolSet(ctx: { userId: string; today: string }): ToolSet {
           system: SYNTHESIS_SYSTEM,
           prompt: `Aggregated rollups (cents): ${JSON.stringify(rollups)}\nActive subscriptions (cents): ${JSON.stringify(subs.subscriptions)}\n\nReturn 2-4 concrete cutback ideas. For each: a short title, a one-line detail with the real number, and the estimated monthly saving in cents. Respond as JSON array: [{"title","detail","monthly_savings_cents","category"}].`,
         });
-        let suggestions: {
-          title: string;
-          detail: string;
-          monthly_savings_cents: number;
-          category: string | null;
-        }[] = [];
-        try {
-          const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-          suggestions = C.SuggestCutbacksOutput.parse({ suggestions: parsed }).suggestions;
-        } catch {
-          suggestions = [];
-        }
+        const suggestions = parseCutbacksOutput(text);
         return { kind: "cutbacks" as const, suggestions };
       },
     }),

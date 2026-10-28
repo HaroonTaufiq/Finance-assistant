@@ -9,6 +9,7 @@ export const IngestSummary = z.object({
   imported: z.number().int().nonnegative(),
   skipped: z.number().int().nonnegative(),
   duplicates: z.number().int().nonnegative().default(0),
+  possibleDuplicates: z.number().int().nonnegative().default(0),
   reasons: z.array(
     z.object({
       reason: z.string(),
