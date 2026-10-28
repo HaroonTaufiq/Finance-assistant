@@ -1,12 +1,24 @@
 # Reviewer handoff
 
-**Date:** 2026-10-28 | **Branch:** `feat/anna-trusted-monthly-review` | **Commit:** `f9c4809320a452e02bc0458f3c34b298a3c1b075` | **PR:** [#17](https://github.com/HaroonTaufiq/Finance-assistant/pull/17) (open; not merged).
+**Date:** 2026-10-28 | **Branch:** `feat/anna-trusted-monthly-review` | **Validated implementation commit:** `a7e74638cc85a4bb4b42f71ac513f23205f3f4e8` | **PR:** [#17](https://github.com/HaroonTaufiq/Finance-assistant/pull/17) (open; not merged). Evidence below was run against that implementation commit; a documentation-only follow-up records this handoff.
 
 ## Summary
 
-This branch advances the standalone monthly review journey: local CSV preview → authenticated persistence → exact monthly report → user correction → recomputed revision. It adds import/recovery and pagination regressions, report/sample pages, classification/review actions, JSON export and confirmed deletion, redacted analytics, operational/launch documentation, and the Anna integration decision gate.
+This PR fixes all five required PR-review findings and advances the standalone monthly review journey: local CSV preview → authenticated persistence → exact monthly report → user correction → recomputed revision. It adds transactional rollup replacement, classification/sign validation, explicit source-less overlap decisions, per-user write serialization, revision-pinned explanations, corrected-result presentation, server-side AI quotas, and receipt manual-entry recovery.
 
 No Anna app bundle or per-user Anna persistence path is implemented. No user interviews, beta, marketplace approval, official qualification, growth, or investment decision is claimed.
+
+## PR #17 acceptance findings
+
+| Finding | Resolution | Regression evidence |
+|---|---|---|
+| REV-1 — stale monthly categories / partial replacement | Each month is replaced atomically; categories absent after correction are removed, and database failure preserves the previous month. | `lib/batch/rollups.test.ts`; pgTAP replacement/failure assertions in `supabase/tests/rls_and_deletion.sql`. |
+| REV-2 — transaction kind and sign ambiguity | Explicit kinds take precedence, transfers are classified regardless of sign, and contradictory expense/refund/income signs are quarantined. | `lib/ingest/parse.test.ts`. |
+| REV-3 — source-less identity and multiplicity | Stable occurrence hashes no longer depend on file fingerprint; probable historical overlap requires explicit match-or-keep choices while identical in-file purchases retain multiplicity. | `lib/ingest/dedup.test.ts`; overlap/retry assertions in `lib/ingest/pipeline.test.ts`. |
+| REV-4 — concurrent writes / wrong import completion | Durable per-user write lease serializes imports, correction, receipt confirmation, retry, subscription review and deletion; completion targets only the captured job IDs. | `lib/db/user-write-lock.test.ts`; late-job regression in `lib/ingest/pipeline.test.ts`; pgTAP lock ownership/concurrency assertions. |
+| REV-5 — ungrounded or stale explanations | Shared report loader exposes currency, gross/refund/net/income, coverage, effective classifications, recurrence evidence and revision. Direct explanation actions pin and recheck revision; transaction tools and cards honor corrected category/kind and currency. | `lib/report/monthly.test.ts`, `lib/report/explanation.test.ts`, `lib/db/queries.test.ts`, `components/result-card.test.ts`. |
+
+Additional recovery safeguards bound streamed chat bodies/context, apply database-backed AI request quotas and concurrency slots, and expose failed receipt extraction as explicit manual entry rather than a success-shaped empty extraction. Receipt confirmation is owner-scoped and idempotent.
 
 ## Requirement coverage
 
@@ -14,37 +26,36 @@ No Anna app bundle or per-user Anna persistence path is implemented. No user int
 |---|---|---|
 | R1 Architecture and supported identity | **Blocked** | [architecture-decision.md](./architecture-decision.md) records official docs and the missing per-user storage-call contract, Anna CLI/runtime/account, and backend identity bridge. Standalone remains usable; no Anna journey is claimed. |
 | R2 Sample-first entry | **Implemented in standalone** | Synthetic March report, explicit sample-only state, deterministic totals/recurrence test, production-build desktop/mobile screenshots. Sample date is fixed and cannot switch into personal mode. |
-| R3 Guided import | **Implemented and exercised locally** | 4 MiB/10,000-row bounds; explicit currency/date order; local preview; mapping/coverage/counters; six-row synthetic authenticated browser import. |
-| R4 Exact monthly report | **Implemented and exercised locally** | Integer cents; gross/refund/net/income/unknown totals; coverage and prior-month comparison; browser report matched fixture values exactly. |
+| R3 Guided import | **Implemented; browser evidence predates this review-fix commit** | 4 MiB/10,000-row bounds; explicit currency/date order; local preview; mapping/coverage/counters; source-less match-or-keep review. Pipeline regressions cover retry and late-job isolation. |
+| R4 Exact monthly report | **Implemented; exact output regression added** | Integer cents; gross/refund/net/income/unknown totals; coverage and prior-month comparison. `lib/report/monthly.test.ts` asserts exact totals, 16.7% comparison and revision stability. |
 | R5 Recurring-charge review | **Implemented in standalone** | Three-observation evidence and uncertainty in sample; confirm/dismiss endpoints; pgTAP verifies a recomputation-style upsert preserves dismissal. No production accuracy claim. |
-| R6 Correction and recomputation | **Implemented and exercised locally** | Changed `MARKET ONE` to `other`; new revision recomputed category rollups while net spend stayed exact. Export retained original category and user override provenance. |
-| R7 Grounded AI explanation | **Partial** | Untrusted merchant/transaction prompt regression and explicit malformed cutback-output errors. Provider failure and retry UI were exercised; successful live explanation is blocked because no model keys were configured. |
-| R8 Persistence, privacy, export, deletion, isolation | **Implemented; local checks pass** | Export route returned 200; confirmed deletion left login active and export empty; pgTAP 18 assertions check account A/B RLS and deletion. Receipt-object deletion with a real uploaded object and provider-backup erasure remain unverified. |
-| R9 Responsive/accessibility | **Partial** | Standalone production sample tested at 1440×1100 and 390×844; mobile had no document horizontal overflow. Keyboard/assistive-technology audit and Anna app-window path remain outstanding. |
-| R10 Analytics and cost controls | **Partial** | Constrained, pseudonymous allow-list; sample/personal modes; analytics RLS/deletion. No production cost baseline, rate quota, alert, or official Anna metric validation. |
+| R6 Correction and recomputation | **Implemented; aggregate and query regressions pass** | Effective category/kind overrides propagate to rollups and transaction results. Atomic replacement removes stale categories. The earlier authenticated browser run changed `MARKET ONE` to `other`; that browser journey was not repeated for this review-fix revision. |
+| R7 Grounded AI explanation | **Partial** | Untrusted merchant/transaction prompt regression and explicit malformed cutback-output errors. Provider-failure/retry UI evidence is from the prior baseline; no live explanation was generated on this revision. |
+| R8 Persistence, privacy, export, deletion, isolation | **Database checks pass; live object journey remains unverified** | pgTAP verifies account A/B isolation, owned write/AI slots, quota enforcement, deletion and atomic rollup behavior (33 assertions). The authenticated export/deletion browser run is prior-baseline evidence; real uploaded-object deletion and provider-backup erasure remain unverified. |
+| R9 Responsive/accessibility | **Partial** | Standalone production sample screenshots at 1440×1100 and 390×844 are prior-baseline evidence; no responsive/browser check was rerun for this revision. Keyboard/assistive-technology audit and Anna app-window path remain outstanding. |
+| R10 Analytics and cost controls | **Partial** | Constrained, pseudonymous allow-list; sample/personal modes; analytics RLS/deletion; database-backed 12-request/hour AI quota by default, configurable 1–60, and one active account AI request. No provider-spend alert, production cost baseline, or official Anna metric validation. |
 
 ## Reproduction
 
 Follow [verification.md](./verification.md) for exact commands, local setup, fixture import, expected report values, correction, export, and deletion steps. Do not reset a database containing work to preserve. The synthetic CSV is [monthly-review.csv](./fixtures/monthly-review.csv).
 
-## Verified checks
+## Verified checks on `a7e74638cc85a4bb4b42f71ac513f23205f3f4e8`
 
-- `pnpm test`: 13 files, 45 tests passed.
-- `pnpm lint`: passed with no ESLint warnings/errors; Next 15 prints a deprecation notice for `next lint`.
-- `pnpm build`: passed on Next.js 15.5.19.
-- `pnpm typecheck`: passed after build generated `.next/types`.
+- `pnpm test`: 21 files, 77 tests passed.
+- `pnpm lint`: passed with no ESLint warnings/errors; Next 15 prints the `next lint` deprecation notice.
+- `pnpm build`: production build passed on Next.js 15.5.19, including all app/API routes.
+- `pnpm typecheck`: passed after the production build generated `.next/types`.
 - `git diff --check`: passed.
-- `supabase migration up --local`: pending redacted-analytics migration applied; local schema up to date.
-- `supabase test db supabase/tests/rls_and_deletion.sql --local`: 19 assertions passed.
-- Browser: authenticated six-row CSV import, exact report, category correction/revision, export preserving original+override, explicit deletion and empty re-export; production-build synthetic sample at desktop/mobile sizes.
-- Browser model failure: provider keys absent; error and retry UI verified. No successful model response or provider cost is reported.
+- `supabase migration up --local`: local schema up to date through `20261028112000_delete_ai_request_slots.sql`; no database reset.
+- `supabase test db supabase/tests/rls_and_deletion.sql --local`: 33 assertions passed.
+- Latest review-fix revision: no authenticated browser journey or live model call was run. The browser evidence in the earlier handoff applies to the pre-fix baseline only; use the reproduction instructions to repeat it against this commit.
 
 ## Performance, cost, and limitations
 
-- Tested import size: six synthetic data rows. Pagination regressions cover reads beyond 1,000 rows, but no 1,000-row reference-hardware p95 benchmark was run.
-- Local pgTAP executed 18 assertions in under one wall-clock second. This is not a production benchmark.
-- No external AI/search call was made and no provider charge was incurred in this verification. Storage/model cost per user/run and deployed p95 remain unmeasured.
-- Anna-specific authentication, persistence, app bundle, model invocation, and review submission are blocked on the platform gate. `anna-app` and `uv` are unavailable in this environment.
+- A mocked synthetic 1,201-row rollup regression crosses the Supabase 1,000-row page boundary and verifies the exact total. It is a correctness check, not an end-to-end import or hardware latency benchmark. No representative p95 benchmark was run.
+- Local pgTAP executed 33 assertions in under one wall-clock second. This is not a production benchmark.
+- No live AI/search call was made and no provider charge was incurred during this verification. Provider cost per user/run, storage cost, and deployed p95 remain unmeasured. The server quota is a request limit, not a monetary cap.
+- Anna-specific authentication, per-user storage, app bundle, model invocation, and review submission remain blocked on the platform gate and provider credentials. `anna-app` and `uv` are unavailable in this environment.
 - No interview, beta, user-retention, official qualification, marketplace, publication, or growth result is claimed.
 - The full boundary and recovery notes are in [operations.md](./operations.md); architecture evidence is in [architecture-decision.md](./architecture-decision.md).
 
