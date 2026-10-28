@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import * as C from "@/lib/contracts";
+import { monthsInRange } from "@/lib/months";
 
 /**
  * Parameterized, bounded query functions backing the tools (PRD-B1).
@@ -29,24 +30,6 @@ type SaveMemoryOut = z.infer<typeof C.SaveMemoryOutput>;
 type Exclusion = { category: string; from: string };
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
-
-/** All month-start keys (YYYY-MM-01) touched by an inclusive date range. */
-function monthsInRange(startDate: string, endDate: string): string[] {
-  const out: string[] = [];
-  let y = Number(startDate.slice(0, 4));
-  let m = Number(startDate.slice(5, 7));
-  const ey = Number(endDate.slice(0, 4));
-  const em = Number(endDate.slice(5, 7));
-  while (y < ey || (y === ey && m <= em)) {
-    out.push(`${y}-${pad2(m)}-01`);
-    m += 1;
-    if (m > 12) {
-      m = 1;
-      y += 1;
-    }
-  }
-  return out;
-}
 
 // ---- getSpending: reads precomputed rollups (no raw rows) ------------------
 export async function getSpending(
