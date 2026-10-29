@@ -1,6 +1,6 @@
 begin;
 
-select plan(33);
+select plan(39);
 
 insert into auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at)
 values
@@ -87,6 +87,16 @@ select is(
   'account A can acquire its durable write lock'
 );
 select is(
+  (select generation from public.read_user_dataset_snapshot('a0000000-0000-4000-8000-000000000001')),
+  1::bigint,
+  'a newly acquired account lock creates the first dataset generation'
+);
+select is(
+  (select write_in_progress from public.read_user_dataset_snapshot('a0000000-0000-4000-8000-000000000001')),
+  true,
+  'readers can detect an active dataset mutation'
+);
+select is(
   public.acquire_user_write_lock(
     'a0000000-0000-4000-8000-000000000001',
     'a4000000-0000-4000-8000-000000000002',
@@ -94,6 +104,15 @@ select is(
   ),
   false,
   'a second request cannot acquire the active account write lock'
+);
+select is(
+  public.renew_user_write_lock(
+    'a0000000-0000-4000-8000-000000000001',
+    'a4000000-0000-4000-8000-000000000001',
+    90
+  ),
+  true,
+  'the owner can renew its live write lease'
 );
 select is(
   public.release_user_write_lock(
@@ -110,6 +129,29 @@ select is(
   ),
   true,
   'the lock owner can release its write lock'
+);
+select is(
+  (select write_in_progress from public.read_user_dataset_snapshot('a0000000-0000-4000-8000-000000000001')),
+  false,
+  'release marks the durable lock idle without deleting its generation'
+);
+select is(
+  public.acquire_user_write_lock(
+    'a0000000-0000-4000-8000-000000000001',
+    'a4000000-0000-4000-8000-000000000003',
+    90
+  ),
+  true,
+  'the next writer can acquire the expired lease'
+);
+select is(
+  (select generation from public.read_user_dataset_snapshot('a0000000-0000-4000-8000-000000000001')),
+  2::bigint,
+  'each writer advances the durable dataset generation'
+);
+select public.release_user_write_lock(
+  'a0000000-0000-4000-8000-000000000001',
+  'a4000000-0000-4000-8000-000000000003'
 );
 select is(
   public.reserve_user_ai_request(

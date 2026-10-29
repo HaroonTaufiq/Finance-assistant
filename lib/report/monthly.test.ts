@@ -10,8 +10,29 @@ vi.mock("@/lib/db/queries", () => ({ getSpending, getSubscriptions }));
 
 import { getMonthlyReport } from "./monthly";
 
-function client(finalRevision = "revision-current") {
+let afterFirstTotals: (() => void) | undefined;
+
+function client(options?: { afterCategoryRead?: () => void }) {
+  let generation = 1;
+  let writeInProgress = false;
   return {
+    rpc: vi.fn(async (name: string) => {
+      if (name !== "read_user_dataset_snapshot") throw new Error(`unexpected RPC: ${name}`);
+      return {
+        data: [{
+          generation,
+          write_in_progress: writeInProgress,
+          updated_at: "2024-03-01T00:00:00Z",
+        }],
+        error: null,
+      };
+    }),
+    advanceGeneration() {
+      generation += 1;
+    },
+    markWriteInProgress() {
+      writeInProgress = true;
+    },
     from(table: string) {
       const filters = new Map<string, unknown>();
       let selected = "";
@@ -58,13 +79,11 @@ function client(finalRevision = "revision-current") {
               error: null,
             };
           }
-          if (table === "import_jobs" && selected === "id") {
-            return { data: { id: finalRevision }, error: null };
-          }
           throw new Error(`unexpected maybeSingle query: ${table} (${selected})`);
         },
         async range() {
           if (table === "rollups") {
+            options?.afterCategoryRead?.();
             return {
               data: [
                 { category: "groceries", total_spend_cents: 3000, total_refund_cents: 0, net_spend_cents: 3000 },
@@ -109,13 +128,18 @@ describe("canonical monthly report loader", () => {
   beforeEach(() => {
     getSpending.mockReset();
     getSubscriptions.mockReset();
-    getSpending.mockImplementation(async (_client, _userId, input) => ({
-      gross_outflows_cents: input.startDate === "2024-02-01" ? 4000 : 3500,
-      refunds_cents: input.startDate === "2024-02-01" ? 500 : 500,
-      net_spend_cents: input.startDate === "2024-02-01" ? 3500 : 3000,
-      total_income_cents: 100000,
-      unknown_inflows_cents: 0,
-    }));
+    afterFirstTotals = undefined;
+    getSpending.mockImplementation(async (_client, _userId, input) => {
+      const report = {
+        gross_outflows_cents: input.startDate === "2024-02-01" ? 4000 : 3500,
+        refunds_cents: 500,
+        net_spend_cents: input.startDate === "2024-02-01" ? 3500 : 3000,
+        total_income_cents: 100000,
+        unknown_inflows_cents: 0,
+      };
+      if (input.startDate === "2024-02-01") afterFirstTotals?.();
+      return report;
+    });
     getSubscriptions.mockResolvedValue({
       subscriptions: [{
         merchant_norm: "STREAMCO",
@@ -150,15 +174,45 @@ describe("canonical monthly report loader", () => {
         deltaCents: 500,
         deltaPercent: 16.7,
       },
-      revision: { id: "revision-current" },
+      revision: { id: "1:revision-current", generation: 1, jobId: "revision-current" },
       transactions: [{ category: "groceries", category_override: "other" }],
     });
     expect(getSpending).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects a report if its revision changes while the snapshot is loading", async () => {
-    await expect(
-      getMonthlyReport(client("revision-late") as never, "user-1", "2024-02"),
-    ).rejects.toThrow("revision changed while loading");
+  it("rejects a mutation completing after totals and before loading the first job revision", async () => {
+    const snapshotClient = client();
+    afterFirstTotals = () => snapshotClient.advanceGeneration();
+
+    await expect(getMonthlyReport(snapshotClient as never, "user-1", "2024-02"))
+      .rejects.toThrow("dataset changed while loading");
+  });
+
+  it("rejects a mutation between category totals and transaction evidence", async () => {
+    const snapshotClient = client({
+      afterCategoryRead: () => snapshotClient.advanceGeneration(),
+    });
+
+    await expect(getMonthlyReport(snapshotClient as never, "user-1", "2024-02"))
+      .rejects.toThrow("dataset changed while loading");
+  });
+
+  it("rejects a writer that starts before the final snapshot check", async () => {
+    const snapshotClient = client();
+    getSubscriptions.mockImplementationOnce(async () => {
+      snapshotClient.markWriteInProgress();
+      return { subscriptions: [] };
+    });
+
+    await expect(getMonthlyReport(snapshotClient as never, "user-1", "2024-02"))
+      .rejects.toThrow("dataset changed while loading");
+  });
+
+  it("rejects a report if a write is already active at snapshot capture", async () => {
+    const snapshotClient = client();
+    snapshotClient.markWriteInProgress();
+
+    await expect(getMonthlyReport(snapshotClient as never, "user-1", "2024-02"))
+      .rejects.toThrow("finance update is running");
   });
 });

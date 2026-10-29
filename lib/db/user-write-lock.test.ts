@@ -52,4 +52,24 @@ describe("withUserWriteLock", () => {
     await expect(withUserWriteLock(client, "user-1", async () => "done"))
       .rejects.toThrow("Could not release the account write lock: injected release failure");
   });
+
+  it("renews the lease for a long-running operation", async () => {
+    vi.useFakeTimers();
+    const { client, rpc } = lockClient();
+    let finish!: () => void;
+    const operation = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const result = withUserWriteLock(client, "user-1", () => operation);
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(rpc).toHaveBeenCalledWith(
+      "renew_user_write_lock",
+      expect.objectContaining({ p_user_id: "user-1", p_lease_seconds: 90 }),
+    );
+
+    finish();
+    await expect(result).resolves.toBeUndefined();
+    vi.useRealTimers();
+  });
 });

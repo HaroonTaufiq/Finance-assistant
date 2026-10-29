@@ -16,24 +16,63 @@ function monthEnd(month: string): string {
   return date.toISOString().slice(0, 10);
 }
 
-export async function getMonthlyReport(
+type DatasetSnapshot = {
+  generation: number;
+  writeInProgress: boolean;
+  updatedAt: string | null;
+};
+
+async function readDatasetSnapshot(
   supabase: SupabaseClient,
   userId: string,
-  requestedMonth?: string | null,
-) {
-  const pendingAtStart = await supabase
+): Promise<DatasetSnapshot> {
+  const { data, error } = await supabase.rpc("read_user_dataset_snapshot", {
+    p_user_id: userId,
+  });
+  if (error) {
+    throw new Error(`report snapshot boundary check failed: ${error.message}`);
+  }
+  const snapshot = (Array.isArray(data) ? data[0] : data) as
+    | { generation: number | string; write_in_progress: boolean; updated_at: string | null }
+    | null;
+  if (!snapshot) throw new Error("report snapshot boundary check returned no generation");
+  return {
+    generation: Number(snapshot.generation),
+    writeInProgress: snapshot.write_in_progress,
+    updatedAt: snapshot.updated_at,
+  };
+}
+
+async function assertNoPendingRevision(
+  supabase: SupabaseClient,
+  userId: string,
+  message: string,
+): Promise<void> {
+  const { data, error } = await supabase
     .from("import_jobs")
     .select("id")
     .eq("user_id", userId)
     .neq("status", "complete")
     .limit(1)
     .maybeSingle();
-  if (pendingAtStart.error) {
-    throw new Error(`report readiness check failed: ${pendingAtStart.error.message}`);
+  if (error) throw new Error(`report readiness check failed: ${error.message}`);
+  if (data) throw new Error(message);
+}
+
+export async function getMonthlyReport(
+  supabase: SupabaseClient,
+  userId: string,
+  requestedMonth?: string | null,
+) {
+  const initialSnapshot = await readDatasetSnapshot(supabase, userId);
+  if (initialSnapshot.writeInProgress) {
+    throw new Error("Report is not current because a finance update is running; retry shortly");
   }
-  if (pendingAtStart.data) {
-    throw new Error("Report is not current because an import needs recovery; retry that import first");
-  }
+  await assertNoPendingRevision(
+    supabase,
+    userId,
+    "Report is not current because an import needs recovery; retry that import first",
+  );
 
   const { data: settings, error: settingsError } = await supabase
     .from("financial_settings")
@@ -56,7 +95,18 @@ export async function getMonthlyReport(
   const currentMonth = new Date().toISOString().slice(0, 7);
   const latestMonth = (latest as { txn_date: string } | null)?.txn_date.slice(0, 7) ?? null;
   const month = requestedMonth ?? (latestMonth === currentMonth ? currentMonth : latestMonth);
-  if (!month) return { hasData: false as const, currency: currency ?? null };
+  if (!month) {
+    await assertNoPendingRevision(
+      supabase,
+      userId,
+      "Report is not current because an import needs recovery; retry that import first",
+    );
+    const finalSnapshot = await readDatasetSnapshot(supabase, userId);
+    if (finalSnapshot.writeInProgress || finalSnapshot.generation !== initialSnapshot.generation) {
+      throw new Error("Report is not current because its dataset changed while loading");
+    }
+    return { hasData: false as const, currency: currency ?? null };
+  }
   if (!currency) throw new Error("Confirm one dataset currency before creating a report");
 
   const { start, end } = monthRange(`${month}-01`);
@@ -126,6 +176,7 @@ export async function getMonthlyReport(
   const currentIsPartial = month === currentMonth && !completeCoverage;
   const priorIsCovered = priorCoverageJobs.length > 0;
 
+  const subscriptions = await getSubscriptions(supabase, userId);
   const latestJobResult = await supabase
     .from("import_jobs")
     .select("id, completed_at")
@@ -135,37 +186,15 @@ export async function getMonthlyReport(
     .limit(1)
     .maybeSingle();
   if (latestJobResult.error) throw new Error(`could not load report revision: ${latestJobResult.error.message}`);
-
-  const subscriptions = await getSubscriptions(supabase, userId);
-  const pendingRevision = await supabase
-    .from("import_jobs")
-    .select("id")
-    .eq("user_id", userId)
-    .neq("status", "complete")
-    .limit(1)
-    .maybeSingle();
-  if (pendingRevision.error) {
-    throw new Error(`report revision readiness check failed: ${pendingRevision.error.message}`);
-  }
-  if (pendingRevision.data) {
-    throw new Error("Report is not current because an import needs recovery; retry that import first");
-  }
-
-  const currentRevision = await supabase
-    .from("import_jobs")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("status", "complete")
-    .order("completed_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (currentRevision.error) {
-    throw new Error(`report revision stability check failed: ${currentRevision.error.message}`);
-  }
-  const initialRevisionId = (latestJobResult.data as { id: string } | null)?.id ?? null;
-  const currentRevisionId = (currentRevision.data as { id: string } | null)?.id ?? null;
-  if (initialRevisionId !== currentRevisionId) {
-    throw new Error("Report is not current because its revision changed while loading");
+  const latestJob = latestJobResult.data as { id: string; completed_at: string } | null;
+  await assertNoPendingRevision(
+    supabase,
+    userId,
+    "Report is not current because an import needs recovery; retry that import first",
+  );
+  const finalSnapshot = await readDatasetSnapshot(supabase, userId);
+  if (finalSnapshot.writeInProgress || finalSnapshot.generation !== initialSnapshot.generation) {
+    throw new Error("Report is not current because its dataset changed while loading");
   }
 
   const deltaCents = report.net_spend_cents - prior.net_spend_cents;
@@ -214,8 +243,13 @@ export async function getMonthlyReport(
     },
     subscriptions: subscriptions.subscriptions,
     transactions,
-    revision: latestJobResult.data ?? null,
-    updatedAt: latestJobResult.data?.completed_at ?? null,
+    revision: {
+      id: `${initialSnapshot.generation}:${latestJob?.id ?? "none"}`,
+      generation: initialSnapshot.generation,
+      jobId: latestJob?.id ?? null,
+      completed_at: latestJob?.completed_at ?? initialSnapshot.updatedAt,
+    },
+    updatedAt: initialSnapshot.updatedAt ?? latestJob?.completed_at ?? null,
   };
 }
 

@@ -23,7 +23,7 @@ The service-role key is server-only. Request handlers use the session-bound Supa
 | Tool-call loop | 5 total steps |
 | Transaction tool result | At most 50 rows |
 | Supabase history scan | 1,000-row pages, ordered scans |
-| Concurrent account writes | One durable 90-second account lease |
+| Concurrent account writes | One durable 90-second account lease, renewed every 20 seconds while the handler is active |
 | Concurrent account AI requests | One 45-second lease |
 | AI requests per account | 12 per hour by default; `FINANCE_AI_REQUESTS_PER_HOUR` accepts 1–60 |
 
@@ -42,7 +42,11 @@ supabase migration up --local
 pnpm dev
 ```
 
-Apply forward migrations; do not use `pnpm db:reset` against a database containing work to preserve. This implementation adds atomic rollup replacement/write-lock, import-overlap review, server-side AI quotas, and AI-slot cleanup migrations through `20261028112000_delete_ai_request_slots.sql`. The local verification ran 33 pgTAP assertions with `supabase test db supabase/tests/rls_and_deletion.sql --local`. In a separate disposable test environment, run:
+Apply forward migrations; do not use `pnpm db:reset` against a database containing work to preserve. The current schema includes atomic rollup replacement/write-lock, import-overlap review, server-side AI quotas, AI-slot cleanup, and durable report-generation snapshots through `20261028121500_dataset_revision_snapshots.sql`.
+
+The 90-second write lease is renewed by a Node timer every 20 seconds while the request event loop is responsive. Next route handlers that mutate financial data declare a 60-second `maxDuration` (30 seconds for receipt extraction). This metadata is enforced only by compatible hosting runtimes; local/self-hosted deployments do not get a hard request deadline from Next. The heartbeat protects long operations while the process remains live, but process pauses longer than the lease can allow lease expiry; if renewal fails, the request reports failure rather than claiming successful lock release. Keep local mutation requests bounded and do not treat the lease as a fencing token against a stalled process resuming after expiry. Database reports capture the durable generation before reads and verify it after reads, rejecting mixed snapshots.
+
+The local verification previously ran 33 pgTAP assertions; the snapshot migration adds lock-generation/renewal assertions. In a separate disposable test environment, run:
 
 ```sh
 supabase test db supabase/tests/rls_and_deletion.sql --local

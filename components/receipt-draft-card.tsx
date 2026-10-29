@@ -2,7 +2,23 @@
 
 import { useState } from "react";
 import { SupportedCurrency, type ReceiptDraft } from "@/lib/contracts";
-import { cn } from "@/lib/utils";
+import { cn, formatCents } from "@/lib/utils";
+import { z } from "zod";
+
+type ReceiptConflict = {
+  id: string;
+  txn_date: string;
+  amount_cents: number;
+  currency: string;
+  merchant_norm: string | null;
+};
+const ReceiptConflictResponse = z.array(z.object({
+  id: z.string().uuid(),
+  txn_date: z.string(),
+  amount_cents: z.number(),
+  currency: z.string(),
+  merchant_norm: z.string().nullable(),
+}));
 
 /**
  * Editable receipt draft (UI_SPEC §5.2). Always requires an explicit Confirm —
@@ -25,12 +41,12 @@ export function ReceiptDraftCard({
   const [currency, setCurrency] = useState(d.currency);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [conflictId, setConflictId] = useState<string | null>(null);
+  const [conflicts, setConflicts] = useState<ReceiptConflict[]>([]);
 
   const low = (f: string) => draft.lowConfidenceFields.includes(f);
   const canConfirm = date.trim() !== "" && total.trim() !== "" && Number(total) > 0;
 
-  async function confirm(resolveConflict?: "keep") {
+  async function confirm(resolveConflict?: "keep" | "merge", mergeTransactionId?: string) {
     setBusy(true);
     setError(null);
     try {
@@ -40,6 +56,7 @@ export function ReceiptDraftCard({
         body: JSON.stringify({
           receiptId: draft.receiptId,
           resolveConflict,
+          mergeTransactionId,
           fields: {
             merchant: merchant || null,
             date,
@@ -53,7 +70,9 @@ export function ReceiptDraftCard({
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Confirm failed");
       if (json.conflict) {
-        setConflictId(json.conflict.existingTransactionId);
+        const conflictResult = ReceiptConflictResponse.safeParse(json.conflict.existingTransactions);
+        if (!conflictResult.success) throw new Error("The matching transactions could not be verified.");
+        setConflicts(conflictResult.data);
         return;
       }
       onConfirmed();
@@ -125,25 +144,36 @@ export function ReceiptDraftCard({
 
       {error && <p className="mt-3 text-sm text-danger">{error}</p>}
 
-      {conflictId ? (
+      {conflicts.length > 0 ? (
         <div className="mt-4 rounded-sm border border-warn/40 bg-surface-sunk p-3 text-sm">
           <p className="text-text-muted">
-            This looks like a transaction you already have. Add it anyway, or discard to avoid
-            double-counting?
+            This matches {conflicts.length === 1 ? "a transaction" : `${conflicts.length} transactions`} already
+            in your history. Keep it as a new purchase, or attach this receipt to one existing transaction.
           </p>
-          <div className="mt-2 flex gap-2">
+          <div className="mt-2 flex flex-wrap gap-2">
             <button
               onClick={() => confirm("keep")}
               disabled={busy}
               className="rounded-sm bg-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
             >
-              Add anyway
+              Keep as new purchase
             </button>
+            {conflicts.map((conflict) => (
+              <button
+                key={conflict.id}
+                onClick={() => confirm("merge", conflict.id)}
+                disabled={busy}
+                className="rounded-sm border border-border px-3 py-1.5 text-xs disabled:opacity-50"
+              >
+                Attach to {conflict.merchant_norm ?? "unnamed"} · {conflict.txn_date} · {formatCents(Math.abs(conflict.amount_cents), conflict.currency)}
+              </button>
+            ))}
             <button
               onClick={onDiscard}
+              disabled={busy}
               className="rounded-sm border border-border px-3 py-1.5 text-xs"
             >
-              Discard
+              Discard receipt
             </button>
           </div>
         </div>

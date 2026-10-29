@@ -80,6 +80,8 @@ const report: CompleteMonthlyReport = {
   }],
   revision: {
     id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    generation: 1,
+    jobId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     completed_at: "2024-05-01T00:00:00Z",
   },
   updatedAt: "2024-05-01T00:00:00Z",
@@ -127,7 +129,12 @@ describe("monthly report explanations", () => {
       .mockResolvedValueOnce(report)
       .mockResolvedValueOnce({
         ...report,
-        revision: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", completed_at: "2024-05-02T00:00:00Z" },
+        revision: {
+          id: "2:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          generation: 2,
+          jobId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          completed_at: "2024-05-02T00:00:00Z",
+        },
       });
     generateText.mockResolvedValue({ text: "A stale explanation." });
 

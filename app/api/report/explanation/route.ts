@@ -15,7 +15,7 @@ export const maxDuration = 30;
 
 const ExplanationRequest = z.object({
   month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
-  revisionId: z.string().uuid(),
+  revisionId: z.string().min(1).max(128),
   topic: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("change") }),
     z.object({ kind: z.literal("recurring"), merchant: z.string().min(1).max(120) }),
