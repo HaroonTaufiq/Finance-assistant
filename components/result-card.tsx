@@ -1,5 +1,6 @@
 "use client";
 
+import React from "react";
 import {
   LineChart,
   Line,
@@ -72,8 +73,18 @@ function Shell({
   );
 }
 
-const Money = ({ cents, className }: { cents: number; className?: string }) => (
-  <span className={cn("tnum tabular-nums", className)}>{formatCents(cents)}</span>
+const Money = ({
+  cents,
+  currency,
+  className,
+}: {
+  cents: number;
+  currency: string | null;
+  className?: string;
+}) => (
+  <span className={cn("tnum tabular-nums", className)}>
+    {currency ? formatCents(cents, currency) : `${(cents / 100).toFixed(2)} · currency not set`}
+  </span>
 );
 
 type Extract<K extends ResultCardData["kind"]> = ResultCardData & { kind: K };
@@ -82,16 +93,31 @@ function SpendingBreakdownCard({ data }: { data: Extract<"spending"> }) {
   const max = Math.max(1, ...data.breakdown.map((b) => b.amount_cents));
   return (
     <Shell eyebrow={`Spending · ${data.period.start} → ${data.period.end}`}>
-      <div className="mb-3 border-b border-border pb-3">
-        <Money cents={data.total_cents} className="font-display text-[28px] font-semibold" />
-      </div>
+      <dl className="mb-3 grid grid-cols-2 gap-3 border-b border-border pb-3 text-sm">
+        <div>
+          <dt className="text-xs text-text-muted">Gross outflows</dt>
+          <dd><Money cents={data.gross_outflows_cents} currency={data.currency} className="font-display text-xl font-semibold" /></dd>
+        </div>
+        <div>
+          <dt className="text-xs text-text-muted">Refunds</dt>
+          <dd><Money cents={data.refunds_cents} currency={data.currency} /></dd>
+        </div>
+        <div>
+          <dt className="text-xs text-text-muted">Net spend</dt>
+          <dd><Money cents={data.net_spend_cents} currency={data.currency} className="font-medium" /></dd>
+        </div>
+        <div>
+          <dt className="text-xs text-text-muted">Income</dt>
+          <dd><Money cents={data.total_income_cents} currency={data.currency} /></dd>
+        </div>
+      </dl>
       {data.breakdown.length > 0 && (
         <ul className="space-y-2">
           {data.breakdown.slice(0, 8).map((b) => (
             <li key={b.key} className="text-sm">
               <div className="mb-0.5 flex justify-between">
                 <span className="capitalize text-text-muted">{b.key}</span>
-                <Money cents={b.amount_cents} />
+                <Money cents={b.amount_cents} currency={data.currency} />
               </div>
               <div className="h-1.5 rounded-full bg-surface-sunk">
                 <div
@@ -118,10 +144,10 @@ function TransactionListCard({ data }: { data: Extract<"transactions"> }) {
             <div className="min-w-0">
               <div className="truncate text-text">{r.merchant ?? "—"}</div>
               <div className="text-xs text-text-faint">
-                {r.date} · <span className="capitalize">{r.category}</span>
+                {r.date} · <span className="capitalize">{r.category} · {r.kind}</span>
               </div>
             </div>
-            <Money cents={Math.abs(r.amount_cents)} className="shrink-0" />
+            <Money cents={Math.abs(r.amount_cents)} currency={r.currency} className="shrink-0" />
           </li>
         ))}
       </ul>
@@ -139,7 +165,7 @@ function TrendCard({ data }: { data: Extract<"trend"> }) {
   return (
     <Shell eyebrow={`Trend${data.category ? ` · ${data.category}` : ""}`}>
       <div className="mb-2 flex items-baseline gap-2">
-        <Money cents={data.current_cents} className="font-display text-2xl font-semibold" />
+        <Money cents={data.current_cents} currency={data.currency} className="font-display text-2xl font-semibold" />
         {data.delta_pct != null && (
           <span
             className={cn(
@@ -162,7 +188,9 @@ function TrendCard({ data }: { data: Extract<"trend"> }) {
             <XAxis dataKey="month" tick={{ fontSize: 11, fill: "var(--text-faint)" }} axisLine={false} tickLine={false} />
             <YAxis hide />
             <Tooltip
-              formatter={(v: number) => formatCents(Math.round(v * 100))}
+              formatter={(v: number) => data.currency
+                ? formatCents(Math.round(v * 100), data.currency)
+                : `${v.toFixed(2)} · currency not set`}
               contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid var(--border)" }}
             />
             <Line type="monotone" dataKey="spend" stroke="var(--accent)" strokeWidth={2} dot={false} />
@@ -190,7 +218,7 @@ function SubscriptionsCard({ data }: { data: Extract<"subscriptions"> }) {
                 {s.next_expected ? ` · next ${s.next_expected}` : ""}
               </div>
             </div>
-            <Money cents={s.avg_amount_cents} />
+            <Money cents={s.avg_amount_cents} currency={s.currency} />
           </li>
         ))}
       </ul>
@@ -231,7 +259,8 @@ function BudgetStatusCard({ data }: { data: Extract<"budget"> }) {
                   {b.category === "__all__" ? "Overall" : b.category}
                 </span>
                 <span className="text-text-muted">
-                  <Money cents={b.spent_cents} /> / <Money cents={b.limit_cents} />
+                  <Money cents={b.spent_cents} currency={b.currency} /> /{" "}
+                  <Money cents={b.limit_cents} currency={b.currency} />
                 </span>
               </div>
               <div className="h-2 overflow-hidden rounded-full bg-surface-sunk">
@@ -281,7 +310,11 @@ function CutbacksCard({ data }: { data: Extract<"cutbacks"> }) {
           <li key={i} className="text-sm">
             <div className="flex justify-between">
               <span className="font-medium text-text">{s.title}</span>
-              <span className="tnum text-income">save {formatCents(s.monthly_savings_cents)}/mo</span>
+              <span className="tnum text-income">
+                save {data.currency
+                  ? formatCents(s.monthly_savings_cents, data.currency)
+                  : `${(s.monthly_savings_cents / 100).toFixed(2)} · currency not set`}/mo
+              </span>
             </div>
             <p className="text-text-muted">{s.detail}</p>
           </li>

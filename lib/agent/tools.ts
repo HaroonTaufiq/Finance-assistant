@@ -4,11 +4,15 @@ import { z } from "zod";
 import { getServerClient } from "@/lib/db/client";
 import { reasoningModel } from "./models";
 import { SYNTHESIS_SYSTEM, MERCHANT_SYSTEM } from "./prompts";
+import { parseCutbacksOutput } from "./cutbacks";
 import { webSearch } from "@/lib/search/web";
 import * as Q from "@/lib/db/queries";
 import * as C from "@/lib/contracts";
 import { formatCents } from "@/lib/utils";
 import { loadMemory, summarizeRule } from "@/lib/memory/rules";
+import { getMonthlyReport } from "@/lib/report/monthly";
+import { buildReportEvidence, StaleReportRevisionError } from "@/lib/report/explanation";
+import { withUserAiRequest } from "@/lib/agent/request-limit";
 
 /**
  * Typed tool definitions (PRD-B1, SPEC §5.1). Each tool = a Zod input schema
@@ -79,24 +83,40 @@ export function buildToolSet(ctx: { userId: string; today: string }): ToolSet {
 
     summarizeFinances: tool({
       description:
-        "Produce a plain-English summary of where the user's money is going over a period. Use for open 'summarize my finances' requests.",
+        "Summarize the latest completed calendar-month report, including currency, coverage, refunds and net spend.",
       inputSchema: C.SummarizeFinancesInput,
       execute: async (input) => {
         const supabase = await getServerClient();
-        const rollups = await Q.getRollupContext(supabase, userId, 6);
-        const { text } = await generateText({
-          model: reasoningModel(),
-          system: SYNTHESIS_SYSTEM,
-          prompt: `Period of interest: ${input.period}. Pre-aggregated monthly rollups (amounts in cents; spend positive in total_spend_cents):\n${JSON.stringify(rollups)}\n\nWrite a concise summary of where the money is going and notable changes.`,
-        });
-        const latest = rollups.find((r) => r.category === "__all__");
-        const stats = latest
-          ? [
-              { label: "Latest month spend", value: formatCents(latest.total_spend_cents) },
-              { label: "Latest month income", value: formatCents(latest.total_income_cents) },
-            ]
-          : [];
-        return { kind: "summary" as const, summary: text, stats };
+        const report = await getMonthlyReport(supabase, userId);
+        if (!report.hasData) {
+          return {
+            kind: "summary" as const,
+            summary: "There is no imported report to summarize yet. Import a transaction export first.",
+            stats: [],
+          };
+        }
+        const revisionId = report.revision?.id;
+        if (!revisionId) throw new Error("A completed report revision is required for a grounded summary.");
+        const { text } = await withUserAiRequest(supabase, userId, () =>
+          generateText({
+            model: reasoningModel(),
+            system: SYNTHESIS_SYSTEM,
+            prompt: `Summarize this latest completed monthly report. Period requested: ${input.period}. Do not describe a category total as net spending unless its field says net spend.\n${JSON.stringify(buildReportEvidence(report))}`,
+            maxOutputTokens: 500,
+          }),
+        );
+        if (!text.trim()) throw new Error("The summary provider returned an empty response.");
+        await assertReportRevision(supabase, userId, report.month, revisionId);
+        return {
+          kind: "summary" as const,
+          summary: text.trim(),
+          stats: [
+            { label: "Gross outflows", value: formatCents(report.totals.grossOutflowsCents, report.currency) },
+            { label: "Refunds", value: formatCents(report.totals.refundsCents, report.currency) },
+            { label: "Net spend", value: formatCents(report.totals.netSpendCents, report.currency) },
+            { label: "Income", value: formatCents(report.totals.incomeCents, report.currency) },
+          ],
+        };
       },
     }),
 
@@ -106,28 +126,24 @@ export function buildToolSet(ctx: { userId: string; today: string }): ToolSet {
       inputSchema: C.SuggestCutbacksInput,
       execute: async () => {
         const supabase = await getServerClient();
-        const [rollups, subs] = await Promise.all([
-          Q.getRollupContext(supabase, userId, 3),
-          Q.getSubscriptions(supabase, userId),
-        ]);
-        const { text } = await generateText({
-          model: reasoningModel(),
-          system: SYNTHESIS_SYSTEM,
-          prompt: `Aggregated rollups (cents): ${JSON.stringify(rollups)}\nActive subscriptions (cents): ${JSON.stringify(subs.subscriptions)}\n\nReturn 2-4 concrete cutback ideas. For each: a short title, a one-line detail with the real number, and the estimated monthly saving in cents. Respond as JSON array: [{"title","detail","monthly_savings_cents","category"}].`,
-        });
-        let suggestions: {
-          title: string;
-          detail: string;
-          monthly_savings_cents: number;
-          category: string | null;
-        }[] = [];
-        try {
-          const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-          suggestions = C.SuggestCutbacksOutput.parse({ suggestions: parsed }).suggestions;
-        } catch {
-          suggestions = [];
+        const report = await getMonthlyReport(supabase, userId);
+        if (!report.hasData) {
+          return { kind: "cutbacks" as const, currency: null, suggestions: [] };
         }
-        return { kind: "cutbacks" as const, suggestions };
+
+        const revisionId = report.revision?.id;
+        if (!revisionId) throw new Error("A completed report revision is required for grounded suggestions.");
+        const { text } = await withUserAiRequest(supabase, userId, () =>
+          generateText({
+            model: reasoningModel(),
+            system: SYNTHESIS_SYSTEM,
+            prompt: `Use this latest completed monthly report to suggest only plausible, non-guaranteed options. Do not equate recurring charges with waste. All amounts are minor units in ${report.currency}.\n${JSON.stringify(buildReportEvidence(report))}\n\nReturn 2-4 concrete ideas, or fewer if evidence is insufficient. For each: a short title, a one-line detail with an evidence-backed amount, and an estimated monthly saving in cents. Respond as JSON array: [{"title","detail","monthly_savings_cents","category"}].`,
+            maxOutputTokens: 600,
+          }),
+        );
+        const suggestions = parseCutbacksOutput(text);
+        await assertReportRevision(supabase, userId, report.month, revisionId);
+        return { kind: "cutbacks" as const, currency: report.currency, suggestions };
       },
     }),
 
@@ -171,40 +187,44 @@ export function buildToolSet(ctx: { userId: string; today: string }): ToolSet {
         "Look up an unfamiliar merchant or card charge online and summarize what it likely is. Use when the user doesn't recognize a charge. Returns a sourced best guess or an honest 'could not determine'.",
       inputSchema: C.LookupMerchantInput,
       execute: async (input) => {
-        const results = await webSearch(
-          `What company is the credit card charge descriptor "${input.merchantName}"? merchant identification`,
-          { topK: 5 },
-        );
-        const miss = {
-          kind: "merchant" as const,
-          couldNotDetermine: true,
-          merchant: null,
-          description: null,
-          sourceUrl: null,
-        };
-        if (results.length === 0) return miss;
+        const supabase = await getServerClient();
+        return withUserAiRequest(supabase, userId, async () => {
+          const results = await webSearch(
+            `What company is the credit card charge descriptor "${input.merchantName}"? merchant identification`,
+            { topK: 5 },
+          );
+          const miss = {
+            kind: "merchant" as const,
+            couldNotDetermine: true,
+            merchant: null,
+            description: null,
+            sourceUrl: null,
+          };
+          if (results.length === 0) return miss;
 
-        const { object } = await generateObject({
-          model: reasoningModel(),
-          schema: z.object({
-            couldNotDetermine: z.boolean(),
-            merchant: z.string().nullable(),
-            description: z.string().nullable(),
-          }),
-          system: MERCHANT_SYSTEM,
-          prompt: `Charge descriptor: "${input.merchantName}"\n\nSearch results:\n${results
-            .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`)
-            .join("\n\n")}`,
+          const { object } = await generateObject({
+            model: reasoningModel(),
+            schema: z.object({
+              couldNotDetermine: z.boolean(),
+              merchant: z.string().nullable(),
+              description: z.string().nullable(),
+            }),
+            system: MERCHANT_SYSTEM,
+            prompt: `Charge descriptor: "${input.merchantName}"\n\nSearch results:\n${results
+              .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`)
+              .join("\n\n")}`,
+            maxOutputTokens: 300,
+          });
+
+          if (object.couldNotDetermine || !object.merchant) return miss;
+          return {
+            kind: "merchant" as const,
+            couldNotDetermine: false,
+            merchant: object.merchant,
+            description: object.description ?? "",
+            sourceUrl: results[0]?.url ?? null,
+          };
         });
-
-        if (object.couldNotDetermine || !object.merchant) return miss;
-        return {
-          kind: "merchant" as const,
-          couldNotDetermine: false,
-          merchant: object.merchant,
-          description: object.description ?? "",
-          sourceUrl: results[0]?.url ?? null,
-        };
       },
     }),
 
@@ -217,4 +237,16 @@ export function buildToolSet(ctx: { userId: string; today: string }): ToolSet {
       },
     }),
   };
+}
+
+async function assertReportRevision(
+  supabase: Awaited<ReturnType<typeof getServerClient>>,
+  userId: string,
+  month: string,
+  revisionId: string,
+): Promise<void> {
+  const current = await getMonthlyReport(supabase, userId, month);
+  if (!current.hasData || current.revision?.id !== revisionId) {
+    throw new StaleReportRevisionError();
+  }
 }

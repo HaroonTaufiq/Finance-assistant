@@ -41,6 +41,7 @@ export async function categorize(
       .update({ category })
       .eq("user_id", userId)
       .eq("category", "uncategorized")
+      .is("category_override", null)
       .or(orFilter)
       .select("id");
 

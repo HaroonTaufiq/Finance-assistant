@@ -33,3 +33,31 @@ export const ReceiptDraft = z.object({
   lowConfidenceFields: z.array(z.string()),
 });
 export type ReceiptDraft = z.infer<typeof ReceiptDraft>;
+
+export function createManualReceiptDraft(receiptId: string): ReceiptDraft {
+  return {
+    receiptId,
+    draft: {
+      merchant: null,
+      date: null,
+      total_cents: null,
+      currency: "USD",
+      lineItems: [],
+      confidence: 0,
+    },
+    requiresConfirm: true,
+    lowConfidenceFields: ["merchant", "date", "total"],
+  };
+}
+
+export function manualReceiptDraftFromFailure(payload: unknown): ReceiptDraft | null {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    !("manualEntryRequired" in payload) ||
+    payload.manualEntryRequired !== true ||
+    !("draft" in payload)
+  ) return null;
+  const parsed = ReceiptDraft.safeParse(payload.draft);
+  return parsed.success ? parsed.data : null;
+}

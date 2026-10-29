@@ -1,8 +1,12 @@
 import Papa from "papaparse";
 import {
   NormalizedTransaction,
+  SupportedCurrency as SupportedCurrencySchema,
   type TransactionSource,
   type RawCsvRow,
+  type DateOrder,
+  type SupportedCurrency,
+  type TransactionKind,
   coerceAmountToCents,
   coerceDate,
   normalizeMerchant,
@@ -34,18 +38,29 @@ const FIELD_SYNONYMS = {
   merchant: ["merchant", "payee", "vendor", "name", "to"],
   category: ["category", "cat"],
   currency: ["currency", "ccy"],
+  transactionKind: ["kind", "type", "transaction kind", "transaction_kind", "transaction type"],
+  account: ["account", "account id", "account_id", "source account"],
+  transactionId: ["transaction id", "transaction_id", "bank transaction id", "external id"],
 } as const;
 
-type Field = keyof typeof FIELD_SYNONYMS;
-type ColumnMap = Partial<Record<Field, string>>;
+export type CsvColumnField = keyof typeof FIELD_SYNONYMS;
+export type CsvColumnMapping = Partial<Record<CsvColumnField, string>>;
+type ColumnMap = CsvColumnMapping;
+export type ParseOptions = {
+  defaultCurrency?: SupportedCurrency;
+  dateOrder?: DateOrder | null;
+  columnMapping?: CsvColumnMapping;
+};
 
-function detectColumns(headers: string[]): ColumnMap {
+function detectColumns(headers: string[], overrides: CsvColumnMapping = {}): ColumnMap {
   const map: ColumnMap = {};
   const lower = headers.map((h) => ({ original: h, norm: h.trim().toLowerCase() }));
-  for (const field of Object.keys(FIELD_SYNONYMS) as Field[]) {
+  for (const field of Object.keys(FIELD_SYNONYMS) as CsvColumnField[]) {
     const synonyms = FIELD_SYNONYMS[field];
     const hit = lower.find((h) => synonyms.includes(h.norm as never));
     if (hit) map[field] = hit.original;
+    const override = overrides[field];
+    if (override && headers.includes(override)) map[field] = override;
   }
   return map;
 }
@@ -61,8 +76,10 @@ export function normalizeRow(
   row: RawCsvRow,
   cols: ColumnMap,
   source: TransactionSource,
+  options: ParseOptions = {},
 ): ParsedRow {
-  const txn_date = coerceDate(pick(row, cols.date));
+  const dateOrder = options.dateOrder === undefined ? "MDY" : options.dateOrder;
+  const txn_date = coerceDate(pick(row, cols.date), dateOrder);
   if (!txn_date) {
     return { ok: false, raw: row, reason: "missing or unparseable date" };
   }
@@ -83,14 +100,51 @@ export function normalizeRow(
   }
 
   const merchant_raw = pick(row, cols.merchant) ?? pick(row, cols.description);
+  const rawKind = pick(row, cols.transactionKind)?.toLowerCase();
+  const rawCategory = (pick(row, cols.category) ?? "uncategorized").toLowerCase();
+  const categoryKind =
+    rawCategory === "income" || rawCategory === "refund"
+      ? rawCategory
+      : rawCategory === "transfer" || rawCategory === "transfers"
+        ? "transfer"
+        : null;
+  const kindAliases: Record<string, TransactionKind> = {
+    expense: "expense",
+    debit: "expense",
+    refund: "refund",
+    income: "income",
+    transfer: "transfer",
+    transfers: "transfer",
+    unknown: "unknown",
+  };
+  const explicitKind = rawKind ? kindAliases[rawKind] : undefined;
+  const inferredKind = explicitKind ?? categoryKind ?? (amount_cents < 0 ? "expense" : "unknown");
+  if (
+    (amount_cents < 0 && (inferredKind === "refund" || inferredKind === "income")) ||
+    (amount_cents > 0 && inferredKind === "expense")
+  ) {
+    return {
+      ok: false,
+      raw: row,
+      reason: `transaction kind "${inferredKind}" conflicts with the amount sign; review the row's kind and amount`,
+    };
+  }
+  const currency = pick(row, cols.currency)?.toUpperCase() ?? options.defaultCurrency ?? "USD";
+  const validatedCurrency = SupportedCurrencySchema.safeParse(currency);
+  if (!validatedCurrency.success) {
+    return { ok: false, raw: row, reason: "unsupported currency" };
+  }
   const candidate = {
     txn_date,
     amount_cents,
-    currency: pick(row, cols.currency) ?? "USD",
+    currency: validatedCurrency.data,
+    transaction_kind: inferredKind,
     merchant_raw,
     merchant_norm: normalizeMerchant(merchant_raw),
-    category: (pick(row, cols.category) ?? "uncategorized").toLowerCase(),
+    category: rawCategory,
     description: pick(row, cols.description),
+    source_account_id: pick(row, cols.account),
+    source_transaction_id: pick(row, cols.transactionId),
     source,
     metadata: {},
   };
@@ -106,6 +160,7 @@ export function normalizeRow(
 export function parseTransactions(
   csv: string,
   source: TransactionSource = "csv",
+  options: ParseOptions = {},
 ): ParseResult {
   const result = Papa.parse<RawCsvRow>(csv, {
     header: true,
@@ -114,7 +169,7 @@ export function parseTransactions(
   });
 
   const headers = result.meta.fields ?? [];
-  const cols = detectColumns(headers);
+  const cols = detectColumns(headers, options.columnMapping);
 
   const valid: NormalizedTransaction[] = [];
   const errors: { raw: RawCsvRow; reason: string }[] = [];
@@ -128,7 +183,7 @@ export function parseTransactions(
   }
 
   for (const raw of result.data) {
-    const out = normalizeRow(raw, cols, source);
+    const out = normalizeRow(raw, cols, source, options);
     if (out.ok) valid.push(out.txn);
     else errors.push({ raw: out.raw, reason: out.reason });
   }

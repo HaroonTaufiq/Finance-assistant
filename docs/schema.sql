@@ -1,3 +1,62 @@
+create table public.analytics_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  user_hash text not null check (user_hash ~ '^[0-9a-f]{64}$'),
+  event_key text not null,
+  event_name text not null,
+  mode text not null,
+  revision text,
+  source text not null default 'direct',
+  campaign text,
+  duration_ms integer,
+  error_code text,
+  created_at timestamptz not null default now(),
+  constraint analytics_events_name_chk check (
+    event_name in (
+      'first_view','sample_view','sign_in','import_started','import_succeeded',
+      'import_failed','report_completed','explanation_succeeded','explanation_failed','next_review'
+    )
+  ),
+  constraint analytics_events_mode_chk check (mode in ('sample','qa','personal')),
+  constraint analytics_events_source_chk check (source in ('direct','referral','community','anna')),
+  constraint analytics_events_campaign_chk check (campaign is null or campaign ~ '^[A-Za-z0-9_-]{1,40}$'),
+  constraint analytics_events_duration_chk check (duration_ms is null or duration_ms between 0 and 600000),
+  constraint analytics_events_uniq unique (user_id, event_key)
+);
+create index analytics_events_name_created_idx on public.analytics_events (event_name, created_at);
+
+create or replace function public.delete_my_financial_data()
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  requester uuid := auth.uid();
+begin
+  if requester is null then
+    raise exception 'authentication required';
+  end if;
+
+  delete from public.analytics_events where user_id = requester;
+  delete from public.messages where user_id = requester;
+  delete from public.conversations where user_id = requester;
+  delete from public.receipts where user_id = requester;
+  delete from public.anomalies where user_id = requester;
+  delete from public.rollups where user_id = requester;
+  delete from public.subscriptions where user_id = requester;
+  delete from public.transactions where user_id = requester;
+  delete from public.import_jobs where user_id = requester;
+  delete from public.ingest_errors where user_id = requester;
+  delete from public.budgets where user_id = requester;
+  delete from public.user_memory where user_id = requester;
+  delete from public.financial_settings where user_id = requester;
+  delete from public.profiles where id = requester;
+end;
+$$;
+revoke all on function public.delete_my_financial_data() from public;
+grant execute on function public.delete_my_financial_data() to authenticated;
+
 -- ============================================================================
 -- Personal Finance Assistant — Database Schema (Supabase / Postgres)
 -- ============================================================================
@@ -45,26 +104,101 @@ create trigger on_auth_user_created
 -- ----------------------------------------------------------------------------
 -- transactions : the raw rows. Heavy table; rarely read row-by-row on requests.
 -- ----------------------------------------------------------------------------
+create table public.financial_settings (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  currency text check (currency in ('USD', 'PKR', 'EUR', 'GBP')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.import_jobs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  file_fingerprint text not null,
+  status text not null default 'processing',
+  affected_months date[] not null default '{}',
+  row_count integer not null default 0,
+  coverage_start date,
+  coverage_end date,
+  coverage_confirmed boolean not null default false,
+  error_code text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  completed_at timestamptz,
+  constraint import_jobs_status_chk check (status in ('processing', 'failed', 'complete')),
+  constraint import_jobs_coverage_chk
+    check (
+      (coverage_start is null and coverage_end is null) or
+      (coverage_start is not null and coverage_end is not null and coverage_start <= coverage_end)
+    ),
+  constraint import_jobs_fingerprint_uniq unique (user_id, file_fingerprint)
+);
+
 create table public.transactions (
   id            uuid primary key default gen_random_uuid(),
   user_id       uuid not null references auth.users(id) on delete cascade,
   txn_date      date not null,
-  amount_cents  bigint not null,                  -- negative = spend, positive = income
+  amount_cents  bigint not null,                  -- immutable signed source amount
   currency      text not null default 'USD',
+  transaction_kind text not null default 'unknown',
+  transaction_kind_override text,
   merchant_raw  text,
   merchant_norm text,                             -- normalized for grouping/matching
   category      text not null default 'uncategorized',
+  category_override text,
+  source_category text,
+  classification_source text not null default 'legacy',
   description   text,
+  source_account_id text,
+  source_transaction_id text,
+  import_fingerprint text,
+  import_job_id uuid references public.import_jobs(id) on delete set null,
   source        text not null,                    -- 'csv' | 'bank' | 'receipt' | 'manual'
   content_hash  text not null,                    -- dedup key (see ingest pipeline)
   metadata      jsonb not null default '{}',
   created_at    timestamptz not null default now(),
   constraint transactions_source_chk check (source in ('csv','bank','receipt','manual')),
+  constraint transactions_kind_chk
+    check (transaction_kind in ('expense','refund','income','transfer','unknown')),
+  constraint transactions_kind_override_chk
+    check (transaction_kind_override is null or transaction_kind_override in ('expense','refund','income','transfer','unknown')),
+  constraint transactions_currency_chk
+    check (currency in ('USD','PKR','EUR','GBP')),
   constraint transactions_uniq unique (user_id, content_hash)  -- idempotent ingest
 );
 create index transactions_user_date_idx     on public.transactions (user_id, txn_date);
 create index transactions_user_cat_date_idx on public.transactions (user_id, category, txn_date);
 create index transactions_user_merchant_idx on public.transactions (user_id, merchant_norm);
+create index transactions_user_import_job_idx on public.transactions (user_id, import_job_id);
+create index transactions_source_identity_idx
+  on public.transactions (user_id, source_account_id, currency, source_transaction_id)
+  where source_transaction_id is not null;
+
+create or replace function public.enforce_transaction_dataset_currency()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  configured_currency text;
+begin
+  select currency into configured_currency
+  from public.financial_settings
+  where user_id = new.user_id;
+
+  if configured_currency is null then
+    raise exception 'dataset currency must be confirmed before saving transactions';
+  end if;
+  if new.currency <> configured_currency then
+    raise exception 'transaction currency does not match the confirmed dataset currency';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger transactions_dataset_currency
+  before insert or update of currency on public.transactions
+  for each row execute function public.enforce_transaction_dataset_currency();
 
 -- ----------------------------------------------------------------------------
 -- rollups : precomputed time-bucketed aggregates (the read path's workhorse).
@@ -75,9 +209,13 @@ create table public.rollups (
   user_id            uuid not null references auth.users(id) on delete cascade,
   period_type        text not null,               -- 'month' (ship); 'week'/'day' optional
   period_start       date not null,
+  currency           text,
   category           text not null,               -- '__all__' or a specific category
   total_spend_cents  bigint not null default 0,   -- spend as a positive number
+  total_refund_cents bigint not null default 0,
+  net_spend_cents    bigint not null default 0,
   total_income_cents bigint not null default 0,
+  total_unknown_inflow_cents bigint not null default 0,
   txn_count          int not null default 0,
   primary key (user_id, period_type, period_start, category),
   constraint rollups_period_chk check (period_type in ('day','week','month'))
@@ -95,8 +233,15 @@ create table public.subscriptions (
   last_seen        date not null,
   next_expected    date,
   confidence       real not null default 0,        -- 0..1
+  lifecycle_status text not null default 'active',
+  occurrence_count integer not null default 0,
+  evidence         jsonb not null default '[]'::jsonb,
+  currency         text,
+  uncertainty      text not null default 'heuristic_pattern_not_verified',
+  amount_change_cents bigint,
   status           text not null default 'active', -- 'active' | 'dismissed'
-  constraint subscriptions_status_chk check (status in ('active','dismissed')),
+  constraint subscriptions_lifecycle_status_chk check (lifecycle_status in ('active','stale')),
+  constraint subscriptions_status_chk check (status in ('active','dismissed','confirmed')),
   constraint subscriptions_uniq unique (user_id, merchant_norm)
 );
 
@@ -202,6 +347,8 @@ create table public.ingest_errors (
 -- Enable on every user-scoped table, then one policy per table.
 -- ============================================================================
 alter table public.profiles      enable row level security;
+alter table public.financial_settings enable row level security;
+alter table public.import_jobs   enable row level security;
 alter table public.transactions  enable row level security;
 alter table public.rollups       enable row level security;
 alter table public.subscriptions enable row level security;
@@ -212,10 +359,17 @@ alter table public.conversations enable row level security;
 alter table public.messages      enable row level security;
 alter table public.receipts      enable row level security;
 alter table public.ingest_errors enable row level security;
+alter table public.analytics_events enable row level security;
 
 -- profiles keys on id (== auth user id); all others key on user_id.
 create policy "profiles_own" on public.profiles
   for all using (id = auth.uid()) with check (id = auth.uid());
+
+create policy "financial_settings_own" on public.financial_settings
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+create policy "import_jobs_own" on public.import_jobs
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 create policy "transactions_own" on public.transactions
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
@@ -245,6 +399,8 @@ create policy "receipts_own" on public.receipts
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 create policy "ingest_errors_own" on public.ingest_errors
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "analytics_events_own" on public.analytics_events
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- ============================================================================

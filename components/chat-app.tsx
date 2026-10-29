@@ -1,11 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useChat } from "@ai-sdk/react";
 import { ArrowUp, Square, Paperclip } from "lucide-react";
-import type { ResultCardData, IngestSummary, ReceiptDraft } from "@/lib/contracts";
+import {
+  manualReceiptDraftFromFailure,
+  ReceiptDraft as ReceiptDraftSchema,
+  type ResultCardData,
+  type IngestSummary,
+  type ReceiptDraft,
+} from "@/lib/contracts";
+import { recordAnalyticsEvent } from "@/lib/analytics/client";
 import { ResultCard } from "./result-card";
 import { ImportSummaryCard } from "./import-summary";
+import { MonthlyReport } from "./monthly-report";
 import { ReceiptDraftCard } from "./receipt-draft-card";
 import { Onboarding } from "./onboarding";
 import { HelpButton } from "./help-button";
@@ -29,7 +38,7 @@ export function ChatApp({
   userEmail: string | null;
   initialHasData: boolean;
 }) {
-  const { messages, sendMessage, status, stop } = useChat();
+  const { messages, sendMessage, status, stop, error: chatError } = useChat();
   const [input, setInput] = useState("");
   const [hasData, setHasData] = useState(initialHasData);
   const [importSummary, setImportSummary] = useState<IngestSummary | null>(null);
@@ -38,6 +47,9 @@ export function ChatApp({
   const [receiptError, setReceiptError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const initialQuestionSent = useRef<string | null>(null);
+  const lastSent = useRef("");
+  const explanationStartedAt = useRef<number | null>(null);
 
   const busy = status === "submitted" || status === "streaming";
   const showOnboarding = !hasData && messages.length === 0 && drafts.length === 0;
@@ -58,8 +70,18 @@ export function ChatApp({
       form.append("file", file);
       const res = await fetch("/api/receipts", { method: "POST", body: form });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Could not read receipt");
-      setDrafts((d) => [...d, json as ReceiptDraft]);
+      if (!res.ok) {
+        const manualDraft = manualReceiptDraftFromFailure(json);
+        if (manualDraft) {
+          setDrafts((drafts) => [...drafts, manualDraft]);
+          setReceiptError(json.error ?? "Enter the receipt details manually.");
+          return;
+        }
+        throw new Error(json.error ?? "Could not read receipt");
+      }
+      const parsedDraft = ReceiptDraftSchema.safeParse(json);
+      if (!parsedDraft.success) throw new Error("Receipt service returned an invalid draft.");
+      setDrafts((drafts) => [...drafts, parsedDraft.data]);
     } catch (e) {
       setReceiptError(e instanceof Error ? e.message : "Could not read receipt");
     } finally {
@@ -71,18 +93,54 @@ export function ChatApp({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, importSummary]);
 
-  function send(text: string) {
+  useEffect(() => {
+    const startedAt = explanationStartedAt.current;
+    if (startedAt === null) return;
+    if (status === "ready") {
+      explanationStartedAt.current = null;
+      void recordAnalyticsEvent({
+        eventKey: `explanation-success:${crypto.randomUUID()}`,
+        eventName: "explanation_succeeded",
+        mode: "personal",
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+    } else if (status === "error") {
+      explanationStartedAt.current = null;
+      void recordAnalyticsEvent({
+        eventKey: `explanation-failure:${crypto.randomUUID()}`,
+        eventName: "explanation_failed",
+        mode: "personal",
+        durationMs: Math.round(performance.now() - startedAt),
+        errorCode: "provider_unavailable",
+      });
+    }
+  }, [status]);
+
+  const send = useCallback((text: string) => {
     const t = text.trim();
     if (!t || busy) return;
+    lastSent.current = t;
+    explanationStartedAt.current = performance.now();
     void sendMessage({ text: t });
     setInput("");
-  }
+  }, [busy, sendMessage]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || busy) return;
+    const question = new URLSearchParams(window.location.search).get("question");
+    if (!question || initialQuestionSent.current === question) return;
+    initialQuestionSent.current = question;
+    send(question);
+  }, [busy, send]);
 
   return (
     <div className="flex h-screen bg-bg text-text">
       {/* Sidebar */}
       <aside className="hidden w-60 shrink-0 flex-col border-r border-border bg-surface/40 p-4 md:flex">
         <div className="font-display text-lg font-semibold">Finance Assistant</div>
+        <Link href="/report" className="mt-4 rounded border border-border px-3 py-2 text-sm text-text-muted hover:text-text">
+          Monthly review
+        </Link>
         <div className="mt-6 text-[11px] font-medium uppercase tracking-wider text-text-faint">
           Quick facts
         </div>
@@ -119,12 +177,25 @@ export function ChatApp({
               />
             ) : (
               <div className="space-y-6">
+                {importSummary && <MonthlyReport embedded />}
                 {messages.length === 0 && drafts.length === 0 && !busy && (
                   <EmptyChat onExample={send} />
                 )}
                 {messages.map((m) => (
                   <MessageTurn key={m.id} message={m} />
                 ))}
+                {chatError && (
+                  <div role="alert" className="rounded border border-danger/40 p-3 text-sm text-danger">
+                    <p>Could not complete the explanation. Your deterministic report is still available.</p>
+                    <button
+                      type="button"
+                      onClick={() => send(lastSent.current)}
+                      className="mt-2 underline"
+                    >
+                      Retry explanation
+                    </button>
+                  </div>
+                )}
                 {status === "submitted" && <ToolRunning label="Thinking…" />}
                 {receiptBusy && <ToolRunning label="Reading your receipt…" />}
                 {receiptError && <p className="text-sm text-danger">{receiptError}</p>}
@@ -212,6 +283,15 @@ export function ChatApp({
                 </button>
               )}
             </form>
+            <p className="mt-2 text-[11px] text-text-faint">
+              Chat sends your question to the configured AI provider. Transaction-specific answers may
+              include only the selected date, merchant, category, amount and currency; raw CSV and
+              imported descriptions are not included in that tool result.
+            </p>
+            <p className="mt-1 text-[11px] text-text-faint">
+              Attaching a receipt uploads its image to your private receipt storage and sends it to the
+              configured vision provider for extraction; you review the draft before it is saved.
+            </p>
             {input.length > MAX_MESSAGE_CHARS * 0.9 && (
               <div className="mt-1 pr-1 text-right text-xs text-text-faint">
                 {input.length}/{MAX_MESSAGE_CHARS}

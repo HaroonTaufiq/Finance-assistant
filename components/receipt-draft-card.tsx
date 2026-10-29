@@ -1,8 +1,24 @@
 "use client";
 
 import { useState } from "react";
-import type { ReceiptDraft } from "@/lib/contracts";
-import { cn } from "@/lib/utils";
+import { SupportedCurrency, type ReceiptDraft } from "@/lib/contracts";
+import { cn, formatCents } from "@/lib/utils";
+import { z } from "zod";
+
+type ReceiptConflict = {
+  id: string;
+  txn_date: string;
+  amount_cents: number;
+  currency: string;
+  merchant_norm: string | null;
+};
+const ReceiptConflictResponse = z.array(z.object({
+  id: z.string().uuid(),
+  txn_date: z.string(),
+  amount_cents: z.number(),
+  currency: z.string(),
+  merchant_norm: z.string().nullable(),
+}));
 
 /**
  * Editable receipt draft (UI_SPEC §5.2). Always requires an explicit Confirm —
@@ -22,14 +38,15 @@ export function ReceiptDraftCard({
   const [merchant, setMerchant] = useState(d.merchant ?? "");
   const [date, setDate] = useState(d.date ?? "");
   const [total, setTotal] = useState(d.total_cents != null ? (d.total_cents / 100).toFixed(2) : "");
+  const [currency, setCurrency] = useState(d.currency);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [conflictId, setConflictId] = useState<string | null>(null);
+  const [conflicts, setConflicts] = useState<ReceiptConflict[]>([]);
 
   const low = (f: string) => draft.lowConfidenceFields.includes(f);
   const canConfirm = date.trim() !== "" && total.trim() !== "" && Number(total) > 0;
 
-  async function confirm(resolveConflict?: "keep") {
+  async function confirm(resolveConflict?: "keep" | "merge", mergeTransactionId?: string) {
     setBusy(true);
     setError(null);
     try {
@@ -39,11 +56,12 @@ export function ReceiptDraftCard({
         body: JSON.stringify({
           receiptId: draft.receiptId,
           resolveConflict,
+          mergeTransactionId,
           fields: {
             merchant: merchant || null,
             date,
             total_cents: Math.round(Number(total) * 100),
-            currency: d.currency,
+            currency,
             lineItems: d.lineItems,
             confidence: d.confidence,
           },
@@ -52,7 +70,9 @@ export function ReceiptDraftCard({
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Confirm failed");
       if (json.conflict) {
-        setConflictId(json.conflict.existingTransactionId);
+        const conflictResult = ReceiptConflictResponse.safeParse(json.conflict.existingTransactions);
+        if (!conflictResult.success) throw new Error("The matching transactions could not be verified.");
+        setConflicts(conflictResult.data);
         return;
       }
       onConfirmed();
@@ -106,29 +126,54 @@ export function ReceiptDraftCard({
             placeholder="0.00"
           />
         </Field>
+        <Field label="Currency" low={false}>
+          <select
+            value={currency}
+            onChange={(e) => setCurrency(e.target.value)}
+            className="w-full bg-transparent text-sm outline-none"
+            aria-label="Receipt currency"
+          >
+            {SupportedCurrency.options.map((supportedCurrency) => (
+              <option key={supportedCurrency} value={supportedCurrency}>
+                {supportedCurrency}
+              </option>
+            ))}
+          </select>
+        </Field>
       </div>
 
       {error && <p className="mt-3 text-sm text-danger">{error}</p>}
 
-      {conflictId ? (
+      {conflicts.length > 0 ? (
         <div className="mt-4 rounded-sm border border-warn/40 bg-surface-sunk p-3 text-sm">
           <p className="text-text-muted">
-            This looks like a transaction you already have. Add it anyway, or discard to avoid
-            double-counting?
+            This matches {conflicts.length === 1 ? "a transaction" : `${conflicts.length} transactions`} already
+            in your history. Keep it as a new purchase, or attach this receipt to one existing transaction.
           </p>
-          <div className="mt-2 flex gap-2">
+          <div className="mt-2 flex flex-wrap gap-2">
             <button
               onClick={() => confirm("keep")}
               disabled={busy}
               className="rounded-sm bg-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
             >
-              Add anyway
+              Keep as new purchase
             </button>
+            {conflicts.map((conflict) => (
+              <button
+                key={conflict.id}
+                onClick={() => confirm("merge", conflict.id)}
+                disabled={busy}
+                className="rounded-sm border border-border px-3 py-1.5 text-xs disabled:opacity-50"
+              >
+                Attach to {conflict.merchant_norm ?? "unnamed"} · {conflict.txn_date} · {formatCents(Math.abs(conflict.amount_cents), conflict.currency)}
+              </button>
+            ))}
             <button
               onClick={onDiscard}
+              disabled={busy}
               className="rounded-sm border border-border px-3 py-1.5 text-xs"
             >
-              Discard
+              Discard receipt
             </button>
           </div>
         </div>

@@ -9,6 +9,7 @@ export const IngestSummary = z.object({
   imported: z.number().int().nonnegative(),
   skipped: z.number().int().nonnegative(),
   duplicates: z.number().int().nonnegative().default(0),
+  possibleDuplicates: z.number().int().nonnegative().default(0),
   reasons: z.array(
     z.object({
       reason: z.string(),
@@ -17,6 +18,19 @@ export const IngestSummary = z.object({
   ),
 });
 export type IngestSummary = z.infer<typeof IngestSummary>;
+
+export const ImportOverlapDecision = z.enum(["match-existing", "keep-as-new"]);
+export type ImportOverlapDecision = z.infer<typeof ImportOverlapDecision>;
+
+export const ImportOverlapCandidate = z.object({
+  key: z.string().min(1),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  amount_cents: z.number().int(),
+  currency: z.string(),
+  merchant: z.string().nullable(),
+  existingCount: z.number().int().positive(),
+});
+export type ImportOverlapCandidate = z.infer<typeof ImportOverlapCandidate>;
 
 /**
  * A raw parsed CSV record before normalization. papaparse yields string→string

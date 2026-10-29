@@ -5,8 +5,12 @@
  * message instead of an opaque platform error.
  */
 export const MAX_CSV_BYTES = 4 * 1024 * 1024; // 4 MB
+export const MAX_CSV_ROWS = 10_000;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MB
 export const MAX_MESSAGE_CHARS = 2000;
+export const MAX_CHAT_MESSAGES = 40;
+export const MAX_CHAT_CONTEXT_CHARS = 20_000;
+export const MAX_CHAT_BODY_BYTES = 256 * 1024;
 
 export const ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
 

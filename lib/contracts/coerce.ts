@@ -57,6 +57,7 @@ export function coerceAmountToCents(raw: string | number | null | undefined): nu
 
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const SLASH_OR_DASH = /^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/;
+export type DateOrder = "MDY" | "DMY";
 
 /**
  * Coerce a raw date string into ISO `YYYY-MM-DD`, or null when unparseable.
@@ -66,7 +67,10 @@ const SLASH_OR_DASH = /^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/;
  * unless the first field is > 12 (then DD/MM). Record this assumption in the
  * README per the brief.
  */
-export function coerceDate(raw: string | null | undefined): string | null {
+export function coerceDate(
+  raw: string | null | undefined,
+  dateOrder: DateOrder | null = "MDY",
+): string | null {
   if (!raw) return null;
   const s = raw.trim();
   if (s === "") return null;
@@ -97,6 +101,10 @@ export function coerceDate(raw: string | null | undefined): string | null {
     if (first > 12 && second <= 12) {
       day = first;
       month = second;
+    } else if (first <= 12 && second <= 12) {
+      if (!dateOrder) return null;
+      month = dateOrder === "MDY" ? first : second;
+      day = dateOrder === "MDY" ? second : first;
     } else {
       month = first;
       day = second;

@@ -4,8 +4,19 @@ import { generateObject } from "ai";
 import { z } from "zod";
 import { getCurrentUser, getServerClient } from "@/lib/db/client";
 import { visionModel } from "@/lib/agent/models";
-import { coerceDate, type ReceiptExtraction, type ReceiptDraft } from "@/lib/contracts";
+import {
+  coerceDate,
+  createManualReceiptDraft,
+  type ReceiptExtraction,
+  type ReceiptDraft,
+} from "@/lib/contracts";
 import { MAX_IMAGE_BYTES, ALLOWED_IMAGE_TYPES, formatBytes } from "@/lib/limits";
+import {
+  UserAiQuotaExceededError,
+  UserAiRequestBusyError,
+  withUserAiRequest,
+} from "@/lib/agent/request-limit";
+import { UserWriteLockBusyError, withUserWriteLock } from "@/lib/db/user-write-lock";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -52,84 +63,114 @@ export async function POST(request: NextRequest) {
   }
 
   const supabase = await getServerClient();
-  const receiptId = randomUUID();
-  const ext = (file.name.split(".").pop() ?? "jpg").toLowerCase();
-  const storagePath = `${user.id}/${receiptId}.${ext}`;
   const bytes = new Uint8Array(await file.arrayBuffer());
-
-  // Store the image (path-scoped RLS confines it to the user's folder).
-  const { error: upErr } = await supabase.storage
-    .from("receipts")
-    .upload(storagePath, bytes, { contentType: file.type || "image/jpeg", upsert: true });
-  if (upErr) {
-    return NextResponse.json({ error: `upload failed: ${upErr.message}` }, { status: 500 });
-  }
-
-  await supabase.from("receipts").insert({
-    id: receiptId,
-    user_id: user.id,
-    storage_path: storagePath,
-    status: "pending",
-  });
-
-  // Vision extraction. On hard failure, fall back to an empty draft for manual entry.
-  let extraction: ReceiptExtraction;
   try {
-    const { object } = await generateObject({
-      model: visionModel(),
-      schema: VisionSchema,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: EXTRACTION_PROMPT },
-            { type: "image", image: bytes, mediaType: file.type || "image/jpeg" },
-          ],
-        },
-      ],
+    return await withUserWriteLock(supabase, user.id, async () => {
+      const receiptId = randomUUID();
+      const ext = (file.name.split(".").pop() ?? "jpg").toLowerCase();
+      const storagePath = `${user.id}/${receiptId}.${ext}`;
+
+      const { error: upErr } = await supabase.storage
+        .from("receipts")
+        .upload(storagePath, bytes, { contentType: file.type || "image/jpeg", upsert: true });
+      if (upErr) {
+        return NextResponse.json({ error: `upload failed: ${upErr.message}` }, { status: 500 });
+      }
+
+      const { error: insertError } = await supabase.from("receipts").insert({
+        id: receiptId,
+        user_id: user.id,
+        storage_path: storagePath,
+        status: "pending",
+      });
+      if (insertError) {
+        const { error: cleanupError } = await supabase.storage.from("receipts").remove([storagePath]);
+        const detail = cleanupError
+          ? `${insertError.message}; image cleanup failed: ${cleanupError.message}`
+          : insertError.message;
+        return NextResponse.json({ error: `could not save receipt: ${detail}` }, { status: 500 });
+      }
+
+      let extraction: ReceiptExtraction;
+      try {
+        const { object } = await withUserAiRequest(supabase, user.id, () =>
+          generateObject({
+            model: visionModel(),
+            schema: VisionSchema,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: EXTRACTION_PROMPT },
+                  { type: "image", image: bytes, mediaType: file.type || "image/jpeg" },
+                ],
+              },
+            ],
+          }),
+        );
+        extraction = {
+          merchant: object.merchant,
+          date: coerceDate(object.date),
+          total_cents: object.total != null ? Math.round(object.total * 100) : null,
+          currency: object.currency ?? "USD",
+          lineItems: object.lineItems.map((li) => ({
+            desc: li.desc,
+            amount_cents: Math.round(li.amount * 100),
+          })),
+          confidence: object.confidence,
+        };
+      } catch (error) {
+        const draft = createManualReceiptDraft(receiptId);
+        const status =
+          error instanceof UserAiQuotaExceededError
+            ? 429
+            : error instanceof UserAiRequestBusyError
+              ? 409
+              : 503;
+        const headers =
+          error instanceof UserAiQuotaExceededError
+            ? { "Retry-After": String(error.retryAfterSeconds) }
+            : undefined;
+        return NextResponse.json(
+          {
+            error: "Automatic extraction is unavailable. The image is saved; enter its details manually.",
+            manualEntryRequired: true,
+            draft,
+          },
+          { status, headers },
+        );
+      }
+
+      const { error: updateError } = await supabase
+        .from("receipts")
+        .update({ extracted: extraction, confidence: extraction.confidence })
+        .eq("id", receiptId)
+        .eq("user_id", user.id);
+      if (updateError) {
+        return NextResponse.json({ error: `could not save receipt extraction: ${updateError.message}` }, { status: 500 });
+      }
+
+      const lowConfidenceFields: string[] = [];
+      if (!extraction.merchant) lowConfidenceFields.push("merchant");
+      if (!extraction.date) lowConfidenceFields.push("date");
+      if (extraction.total_cents == null) lowConfidenceFields.push("total");
+      if (extraction.confidence < CONFIDENCE_THRESHOLD && lowConfidenceFields.length === 0) {
+        lowConfidenceFields.push("total");
+      }
+
+      const draft: ReceiptDraft = {
+        receiptId,
+        draft: extraction,
+        requiresConfirm: true,
+        lowConfidenceFields,
+      };
+      return NextResponse.json(draft);
     });
-    extraction = {
-      merchant: object.merchant,
-      date: coerceDate(object.date),
-      total_cents: object.total != null ? Math.round(object.total * 100) : null,
-      currency: object.currency ?? "USD",
-      lineItems: object.lineItems.map((li) => ({
-        desc: li.desc,
-        amount_cents: Math.round(li.amount * 100),
-      })),
-      confidence: object.confidence,
-    };
-  } catch {
-    extraction = {
-      merchant: null,
-      date: null,
-      total_cents: null,
-      currency: "USD",
-      lineItems: [],
-      confidence: 0,
-    };
+  } catch (error) {
+    const status = error instanceof UserWriteLockBusyError ? 409 : 503;
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Receipt upload could not be completed." },
+      { status },
+    );
   }
-
-  // Persist the extraction for the record.
-  await supabase
-    .from("receipts")
-    .update({ extracted: extraction, confidence: extraction.confidence })
-    .eq("id", receiptId);
-
-  // Confidence gate: flag fields that need review.
-  const lowConfidenceFields: string[] = [];
-  if (!extraction.merchant) lowConfidenceFields.push("merchant");
-  if (!extraction.date) lowConfidenceFields.push("date");
-  if (extraction.total_cents == null) lowConfidenceFields.push("total");
-  if (extraction.confidence < CONFIDENCE_THRESHOLD && lowConfidenceFields.length === 0) {
-    lowConfidenceFields.push("total"); // low overall confidence → review the amount
-  }
-
-  const draft: ReceiptDraft = {
-    receiptId,
-    draft: extraction,
-    requiresConfirm: true,
-    lowConfidenceFields,
-  };
-  return NextResponse.json(draft);
 }
