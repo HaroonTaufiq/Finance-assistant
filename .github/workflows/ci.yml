@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: App checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      # Build-time placeholders only; this job never connects to a real account.
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54331
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-public-placeholder
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 9.15.2
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Unit and route tests
+        run: pnpm test
+      - name: Lint
+        run: pnpm lint
+      - name: Production build
+        run: pnpm build
+      # Next generates .next/types during the build.
+      - name: Typecheck
+        run: pnpm typecheck
+
+  database:
+    name: Database checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1
+        with:
+          version: 2.90.0
+      # Each hosted runner has a new, disposable Docker database. No linked
+      # project, production token, developer database or reset is used.
+      - name: Start isolated Supabase and apply forward migrations
+        run: supabase start --exclude studio,imgproxy,edge-runtime,logflare,vector,supavisor,postgres-meta,realtime
+      - name: Verify forward migrations are current
+        run: supabase migration up --local
+      - name: Database isolation and recovery tests
+        run: supabase test db supabase/tests/rls_and_deletion.sql --local
+      - name: Clean up disposable runner database
+        if: always()
+        run: supabase stop --no-backup
