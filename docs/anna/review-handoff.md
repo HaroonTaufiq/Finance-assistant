@@ -2,7 +2,7 @@
 
 Date: 2026-10-29
 Branch: `feat/anna-trusted-monthly-review`
-Latest validated code commit: `pending-final-commit`
+Latest validated code commit: `a719796`
 PR: [#17](https://github.com/HaroonTaufiq/Finance-assistant/pull/17)
 
 ## Scope and resolution
