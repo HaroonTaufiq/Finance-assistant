@@ -40,7 +40,7 @@ Browser evidence on the current production build:
 
 - Local port 3000 reached the signed-in chat with the synthetic 1,000-row dataset loaded and reported `1000 added` / `0 skipped`.
 - The six-row fixture journey produced February gross outflows 4,000 cents, refunds 500 cents, net spend 3,500 cents, income 100,000 cents, then recomputed groceries 3,000 cents / other 1,000 cents after correcting `MARKET ONE`; export preserved the original category and `classification_source: "user"`.
-- Explicit deletion returned 200, preserved the sign-in account, and left `/api/report` with `hasData: false` and export with zero transactions.
+- Explicit deletion returned 200, preserved the user account, and left `/api/report` with `hasData: false` and export with zero transactions.
 - With receipt-provider configuration absent on port 3001, a 1-pixel PNG produced the explicit manual-entry draft without a provider call; the synthetic receipt data and file were then deleted.
 - The report rendered with no horizontal overflow at 390×844 and visible keyboard focus on core controls.
 - Console only showed the expected favicon 404; no browser warnings were raised.
